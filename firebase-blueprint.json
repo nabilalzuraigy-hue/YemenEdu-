@@ -1,0 +1,459 @@
+{
+  "entities": {
+    "superAdmin": {
+      "title": "SuperAdmin",
+      "description": "System owner and super admin profile",
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "description": "Secret access code"
+        },
+        "name": {
+          "type": "string",
+          "description": "Super admin full name"
+        },
+        "role": {
+          "type": "string",
+          "description": "Role identifier"
+        },
+        "isLifetime": {
+          "type": "boolean",
+          "description": "Lifetime access flag"
+        },
+        "schoolName": {
+          "type": "string",
+          "description": "Admin institution name"
+        }
+      },
+      "required": ["code", "name", "role", "isLifetime"]
+    },
+    "school": {
+      "title": "School",
+      "description": "Registered educational school",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique school ID"
+        },
+        "name": {
+          "type": "string",
+          "description": "Official school name in Arabic"
+        },
+        "prefix": {
+          "type": "string",
+          "description": "3 or 4 uppercase character code prefix"
+        },
+        "city": {
+          "type": "string",
+          "description": "City or governorate"
+        },
+        "isActive": {
+          "type": "boolean",
+          "description": "Whether the school is currently active"
+        }
+      },
+      "required": ["id", "name", "prefix", "city", "isActive"]
+    },
+    "codeRecord": {
+      "title": "CodeRecord",
+      "description": "Activation code for 30-day student, teacher, or principal access",
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "description": "Unique activation code string"
+        },
+        "role": {
+          "type": "string",
+          "description": "Assigned user role: admin, principal, teacher, or student"
+        },
+        "roleTitleAr": {
+          "type": "string",
+          "description": "Arabic title of the role"
+        },
+        "assignedToName": {
+          "type": "string",
+          "description": "Name of student or educator"
+        },
+        "grade": {
+          "type": "string",
+          "description": "Grade level 7, 8, or 9"
+        },
+        "subject": {
+          "type": "string",
+          "description": "Assigned subject for teachers"
+        },
+        "phone": {
+          "type": "string",
+          "description": "Contact phone number"
+        },
+        "schoolId": {
+          "type": "string",
+          "description": "School identifier"
+        },
+        "schoolName": {
+          "type": "string",
+          "description": "School name"
+        },
+        "isTest": {
+          "type": "boolean",
+          "description": "Whether this is a test code"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Creation timestamp ISO"
+        },
+        "isActivated": {
+          "type": "boolean",
+          "description": "Whether the code has been activated"
+        },
+        "activatedAt": {
+          "type": "string",
+          "description": "First activation timestamp ISO"
+        },
+        "expiresAt": {
+          "type": "string",
+          "description": "Expiration timestamp ISO"
+        }
+      },
+      "required": ["code", "role", "assignedToName", "isActivated"]
+    },
+    "question": {
+      "title": "Question",
+      "description": "Official question in question bank (MCQ or Essay)",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique question ID"
+        },
+        "grade": {
+          "type": "string",
+          "description": "Target grade level (7, 8, or 9)"
+        },
+        "subject": {
+          "type": "string",
+          "description": "Subject name"
+        },
+        "type": {
+          "type": "string",
+          "description": "Question type: mcq or essay"
+        },
+        "questionText": {
+          "type": "string",
+          "description": "Text of the question"
+        },
+        "points": {
+          "type": "number",
+          "description": "Max points for this question"
+        },
+        "teacherName": {
+          "type": "string",
+          "description": "Author teacher name"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Creation date"
+        }
+      },
+      "required": ["id", "grade", "subject", "type", "questionText", "points", "teacherName"]
+    },
+    "announcement": {
+      "title": "Announcement",
+      "description": "School circular or administration announcement",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Announcement ID"
+        },
+        "title": {
+          "type": "string",
+          "description": "Announcement headline"
+        },
+        "content": {
+          "type": "string",
+          "description": "Details text"
+        },
+        "target": {
+          "type": "string",
+          "description": "Target audience: all, teachers, or students"
+        },
+        "priority": {
+          "type": "string",
+          "description": "Priority: عاجل, هام, or عادي"
+        },
+        "senderName": {
+          "type": "string",
+          "description": "Sender name"
+        },
+        "senderRoleAr": {
+          "type": "string",
+          "description": "Sender title in Arabic"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Creation timestamp"
+        },
+        "readCount": {
+          "type": "number",
+          "description": "Number of views"
+        }
+      },
+      "required": ["id", "title", "content", "target", "priority", "senderName"]
+    },
+    "submission": {
+      "title": "Submission",
+      "description": "Student homework submission including notebook photo",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique submission ID"
+        },
+        "studentCode": {
+          "type": "string",
+          "description": "Student activation code"
+        },
+        "studentName": {
+          "type": "string",
+          "description": "Student full name"
+        },
+        "grade": {
+          "type": "string",
+          "description": "Grade level"
+        },
+        "subject": {
+          "type": "string",
+          "description": "Subject title"
+        },
+        "title": {
+          "type": "string",
+          "description": "Assignment title or question text"
+        },
+        "type": {
+          "type": "string",
+          "description": "Submission type: photo_homework or quiz_auto"
+        },
+        "photoUrl": {
+          "type": "string",
+          "description": "URL or storage reference to uploaded notebook photo"
+        },
+        "studentNotes": {
+          "type": "string",
+          "description": "Notes written by student"
+        },
+        "score": {
+          "type": "number",
+          "description": "Teacher graded score"
+        },
+        "maxScore": {
+          "type": "number",
+          "description": "Max points"
+        },
+        "status": {
+          "type": "string",
+          "description": "Status: graded or بانتظار المراجعة"
+        },
+        "isLocked": {
+          "type": "boolean",
+          "description": "Whether grade has been locked"
+        },
+        "teacherFeedback": {
+          "type": "string",
+          "description": "Teacher comments"
+        },
+        "principalComment": {
+          "type": "string",
+          "description": "Principal supportive comments"
+        },
+        "submittedAt": {
+          "type": "string",
+          "description": "Submission date string"
+        }
+      },
+      "required": ["id", "studentCode", "studentName", "grade", "subject", "title", "status"]
+    },
+    "gradeRecord": {
+      "title": "GradeRecord",
+      "description": "Recorded student grade entry",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Record ID"
+        },
+        "studentCode": {
+          "type": "string",
+          "description": "Student code"
+        },
+        "studentName": {
+          "type": "string",
+          "description": "Student name"
+        },
+        "score": {
+          "type": "number",
+          "description": "Earned score"
+        },
+        "maxScore": {
+          "type": "string",
+          "description": "Max possible score"
+        },
+        "subject": {
+          "type": "string",
+          "description": "Subject code or title"
+        },
+        "subjectName": {
+          "type": "string",
+          "description": "Arabic subject name"
+        },
+        "note": {
+          "type": "string",
+          "description": "Teacher note"
+        },
+        "date": {
+          "type": "string",
+          "description": "Date recorded"
+        }
+      },
+      "required": ["id", "studentCode", "studentName", "score", "subject", "date"]
+    },
+    "textbook": {
+      "title": "Textbook",
+      "description": "Yemeni curriculum official textbook",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Textbook ID"
+        },
+        "title": {
+          "type": "string",
+          "description": "Book title"
+        },
+        "grade": {
+          "type": "string",
+          "description": "Grade level"
+        },
+        "gradeNameAr": {
+          "type": "string",
+          "description": "Arabic grade title"
+        },
+        "subject": {
+          "type": "string",
+          "description": "Subject name"
+        },
+        "pagesCount": {
+          "type": "number",
+          "description": "Total pages"
+        },
+        "sampleSummary": {
+          "type": "string",
+          "description": "Curriculum overview summary"
+        }
+      },
+      "required": ["id", "title", "grade", "subject", "pagesCount"]
+    },
+    "teacherRecommendation": {
+      "title": "TeacherRecommendation",
+      "description": "Teacher recommendation sent either to all students of a grade or privately to a specific student",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Recommendation ID" },
+        "teacherId": { "type": "string", "description": "Teacher activation code" },
+        "teacherName": { "type": "string", "description": "Teacher display name" },
+        "schoolId": { "type": "string", "description": "School identifier" },
+        "grade": { "type": "string", "description": "Grade level" },
+        "subject": { "type": "string", "description": "Subject name" },
+        "title": { "type": "string", "description": "Recommendation headline" },
+        "content": { "type": "string", "description": "Recommendation text" },
+        "category": { "type": "string", "description": "Recommendation category" },
+        "targetScope": { "type": "string", "description": "all_students or specific_student" },
+        "targetStudentCode": { "type": "string", "description": "Target student code when private" },
+        "targetStudentName": { "type": "string", "description": "Target student name when private" },
+        "createdAt": { "type": "number", "description": "Timestamp ms" },
+        "createdAtFormatted": { "type": "string", "description": "Formatted Arabic date-time" }
+      },
+      "required": ["id", "teacherId", "teacherName", "schoolId", "grade", "subject", "content"]
+    },
+    "testConnection": {
+      "title": "TestConnection",
+      "description": "Connection health check entity",
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "description": "Health status"
+        }
+      }
+    }
+  },
+  "firestore": {
+    "/test/{testId}": {
+      "schema": "testConnection",
+      "description": "Health check document path for testing database availability"
+    },
+    "/super_admins/{adminId}": {
+      "schema": "superAdmin",
+      "description": "Collection storing super admin credentials and owner profile"
+    },
+    "/schools/{schoolId}": {
+      "schema": "school",
+      "description": "Collection storing schools list"
+    },
+    "/codes/{codeId}": {
+      "schema": "codeRecord",
+      "description": "Collection storing activation codes"
+    },
+    "/registeredCodes/{codeId}": {
+      "schema": "codeRecord",
+      "description": "Collection storing registered activation codes"
+    },
+    "/students/{studentId}": {
+      "schema": "codeRecord",
+      "description": "Collection storing student accounts"
+    },
+    "/teachers/{teacherId}": {
+      "schema": "codeRecord",
+      "description": "Collection storing teacher accounts"
+    },
+    "/questions/{questionId}": {
+      "schema": "question",
+      "description": "Collection storing questions in the questions bank"
+    },
+    "/announcements/{announcementId}": {
+      "schema": "announcement",
+      "description": "Collection storing school announcements and circulars"
+    },
+    "/submissions/{submissionId}": {
+      "schema": "submission",
+      "description": "Collection storing homework submissions and notebook photos"
+    },
+    "/grades/{gradeId}": {
+      "schema": "gradeRecord",
+      "description": "Collection storing official grade records"
+    },
+    "/textbooks/{bookId}": {
+      "schema": "textbook",
+      "description": "Collection storing Yemeni curriculum textbooks"
+    },
+    "/term_results/{resultId}": {
+      "schema": "gradeRecord",
+      "description": "Collection storing preserved student final term results (GPA, Pass/Fail)"
+    },
+    "/monthlyReports/{reportId}": {
+      "schema": "gradeRecord",
+      "description": "Collection storing archived monthly and cumulative performance reports"
+    },
+    "/monthlyGradebooks/{recordId}": {
+      "schema": "gradeRecord",
+      "description": "Collection storing archived monthly teacher gradebooks and rollover records"
+    },
+    "/recommendations/{recId}": {
+      "schema": "teacherRecommendation",
+      "description": "Collection storing public and student-private teacher recommendations"
+    }
+  }
+}
