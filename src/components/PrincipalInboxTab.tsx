@@ -241,10 +241,10 @@ export const PrincipalInboxTab: React.FC<PrincipalInboxTabProps> = ({
       setNoteComposer(null);
       notifyAction(
         status === 'approved'
-          ? '✅ تم اعتماد كشف الحضور والغياب ونشره مباشرة في لوحة المدرسة.'
+          ? '✅ تم اعتماد كشف الحضور والغياب وإشعار المشرف (يظهر في بوابة المشرف والمدير وحساب الطالب الخاص فقط).'
           : status === 'revision_requested'
           ? '✏️ تم إرجاع كشف الحضور للمشرف للتعديل.'
-          : 'تم رفض كشف الحضور وإشعار المشرف.'
+          : 'تم رفض كشف الحضور وإشعار المشرف بالسبب.'
       );
     } catch (err: any) {
       notifyAction(err?.message || 'حدث خطأ أثناء معالجة كشف الحضور.');
@@ -473,7 +473,7 @@ export const PrincipalInboxTab: React.FC<PrincipalInboxTabProps> = ({
                       className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-black flex items-center gap-1.5 shadow-2xs cursor-pointer"
                     >
                       <CheckCircle2 className="w-4 h-4" />
-                      <span>اعتماد ونشر بلوحة المدرسة</span>
+                      <span>اعتماد كشف الحضور</span>
                     </button>
 
                     <button
@@ -605,10 +605,27 @@ export const PrincipalInboxTab: React.FC<PrincipalInboxTabProps> = ({
                   </div>
 
                   <div className="space-y-1.5">
-                    <h4 className="font-black text-sm sm:text-base text-[#1A3A5F]">{act.title}</h4>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <h4 className="font-black text-sm sm:text-base text-[#1A3A5F]">{act.title}</h4>
+                      {act.inputType && (
+                        <span className="px-2 py-0.5 rounded-full bg-white text-[#1F5AAA] border border-[#C6DCF2] text-[10px] font-black">
+                          إدخال: {act.inputType}
+                        </span>
+                      )}
+                    </div>
                     <p className="text-xs sm:text-sm text-slate-700 leading-relaxed whitespace-pre-wrap font-medium">
-                      {act.details}
+                      {act.formalText || act.details}
                     </p>
+                    {act.audioUrl && (
+                      <div className="pt-1">
+                        <audio controls src={act.audioUrl} className="w-full max-w-md h-9" />
+                      </div>
+                    )}
+                    {act.originalText && (
+                      <p className="text-[11px] font-semibold text-[#5C7085] bg-white/75 rounded-xl px-3 py-1.5 border border-slate-200">
+                        النص الأصلي للمشرف: {act.originalText}
+                      </p>
+                    )}
                   </div>
 
                   {images.length > 0 && (
@@ -650,6 +667,7 @@ export const PrincipalInboxTab: React.FC<PrincipalInboxTabProps> = ({
                         {act.targetGrade === 'الكل' || !act.targetGrade
                           ? 'جميع الصفوف'
                           : getGradeLabelAr(act.targetGrade)}
+                        {act.targetClass && act.targetClass !== 'الكل' ? ` — فصل ${act.targetClass}` : ''}
                       </span>
                     </span>
                     <span>

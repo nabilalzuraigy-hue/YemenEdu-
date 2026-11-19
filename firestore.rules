@@ -146,5 +146,11 @@ service cloud.firestore {
       allow read: if true;
       allow write: if isValidId(activityId);
     }
+
+    // Workflow Notifications (Supervisor <-> Principal)
+    match /notifications/{notificationId} {
+      allow read: if true;
+      allow write: if isValidId(notificationId);
+    }
   }
 }

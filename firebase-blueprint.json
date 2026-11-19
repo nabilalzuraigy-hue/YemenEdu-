@@ -437,9 +437,14 @@
         "subType": { "type": "string", "description": "Sub-category e.g. زيارة فصلية, رياضي, حفل تكريم" },
         "title": { "type": "string", "description": "Activity title" },
         "details": { "type": "string", "description": "Activity description" },
-        "images": { "type": "array", "description": "Up to 3 compressed base64 photo data URLs" },
+        "images": { "type": "array", "description": "Up to 3 compressed JPG photo data URLs (max 1280px)" },
         "targetGrade": { "type": "string", "description": "Target grade or الكل" },
+        "targetClass": { "type": "string", "description": "Target class/section number or الكل" },
         "activityDate": { "type": "string", "description": "YYYY-MM-DD date" },
+        "inputType": { "type": "string", "description": "صوت or صورة" },
+        "originalText": { "type": "string", "description": "Original supervisor voice transcript or 1-line photo caption" },
+        "formalText": { "type": "string", "description": "Final formal Arabic report drafted by Gemini and reviewed by supervisor" },
+        "audioUrl": { "type": "string", "description": "Firebase Storage URL for supervisor voice recording (max 2 min)" },
         "createdBy": { "type": "string", "description": "Supervisor name" },
         "supervisorCode": { "type": "string", "description": "Supervisor code" },
         "approvalStatus": { "type": "string", "description": "pending, approved, revision_requested, or rejected" },
@@ -450,6 +455,26 @@
         "createdAtFormatted": { "type": "string", "description": "Formatted date-time" }
       },
       "required": ["id", "schoolId", "category", "title", "details", "createdBy"]
+    },
+    "notification": {
+      "title": "Notification",
+      "description": "In-app notifications between Supervisor and Principal for report review workflow",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Notification ID" },
+        "schoolId": { "type": "string", "description": "School identifier" },
+        "recipientRole": { "type": "string", "description": "principal or supervisor" },
+        "recipientCode": { "type": "string", "description": "Optional recipient activation code" },
+        "type": { "type": "string", "description": "new_report, approved, rejected, or revision_requested" },
+        "title": { "type": "string", "description": "Notification title" },
+        "message": { "type": "string", "description": "Notification message text" },
+        "relatedId": { "type": "string", "description": "Related report/activity/attendance ID" },
+        "relatedKind": { "type": "string", "description": "activity or attendance" },
+        "isRead": { "type": "boolean", "description": "Whether the notification was read" },
+        "createdAt": { "type": "number", "description": "Creation timestamp ms" },
+        "createdAtFormatted": { "type": "string", "description": "Formatted Arabic date-time" }
+      },
+      "required": ["id", "schoolId", "recipientRole", "type", "message", "isRead", "createdAt"]
     },
     "testConnection": {
       "title": "TestConnection",
@@ -539,6 +564,10 @@
     "/supervisor_activities/{activityId}": {
       "schema": "supervisorActivity",
       "description": "Collection storing supervisor reports, events, sports/cultural activities, and school trips"
+    },
+    "/notifications/{notificationId}": {
+      "schema": "notification",
+      "description": "Collection storing workflow notifications between Supervisor and Principal"
     }
   }
 }

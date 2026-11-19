@@ -23,6 +23,8 @@ import {
   History,
   RefreshCw,
   Folder,
+  UserCheck,
+  ShieldCheck,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { collection, query, where, onSnapshot, addDoc, setDoc, doc, serverTimestamp } from 'firebase/firestore';
@@ -32,6 +34,8 @@ import {
   appDataService,
   Question,
   Announcement,
+  AttendanceRecord,
+  AttendanceStatus,
   GradeRecord,
   HomeworkSubmission,
   isObjectiveQuestion,
@@ -55,37 +59,77 @@ import { ScheduleGridView } from '../components/ScheduleGridView';
 import { SchoolBoardView } from '../components/SchoolBoardView';
 import { playGentleNotificationSound, unlockNotificationAudio } from '../services/soundUtils';
 import { formatArabicSchoolName, getSchoolPrincipalName, isGenericPrincipalSender, isSimulationAnnouncement } from '../utils/schoolDisplay';
+import { compressImageFile } from '../utils/imageCompression';
 
-// Client-side fast image compression for fast notebook upload
-const compressImage = (file: File, maxWidth = 1200, quality = 0.7): Promise<string> => {
-  return new Promise((resolve) => {
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const img = new Image();
-      img.onload = () => {
-        let width = img.width;
-        let height = img.height;
-        if (width > maxWidth) {
-          height = Math.round((height * maxWidth) / width);
-          width = maxWidth;
-        }
-        const canvas = document.createElement('canvas');
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) {
-          resolve(event.target?.result as string);
-          return;
-        }
-        ctx.drawImage(img, 0, 0, width, height);
-        resolve(canvas.toDataURL('image/jpeg', quality));
-      };
-      img.onerror = () => resolve(event.target?.result as string);
-      img.src = event.target?.result as string;
-    };
-    reader.onerror = () => resolve('');
-    reader.readAsDataURL(file);
-  });
+interface StudentOwnAttendanceItem {
+  id: string;
+  date: string;
+  gradeLabel: string;
+  classNumber: string;
+  status: AttendanceStatus;
+  note?: string;
+  recordedBy: string;
+}
+
+const normalizeArabicStudentKey = (value?: string): string => {
+  if (!value) return '';
+  return value
+    .replace(/[\u064B-\u065F\u0670\u0640]/g, '')
+    .replace(/[أإآٱ]/g, 'ا')
+    .replace(/ة/g, 'ه')
+    .replace(/ى/g, 'ي')
+    .replace(/^(الطالب|الطالبه|طالبه|طالب)\s+/i, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+};
+
+const extractStudentOwnAttendance = (
+  records: AttendanceRecord[],
+  studentName?: string,
+  studentCode?: string,
+  studentGrade?: string
+): StudentOwnAttendanceItem[] => {
+  const normName = normalizeArabicStudentKey(studentName);
+  const normCode = (studentCode || '').trim().toLowerCase();
+  const targetGrade = String(studentGrade || '').trim();
+  const nameTokens = normName.split(' ').filter((t) => t.length > 1);
+
+  const isThisStudent = (entryName?: string): boolean => {
+    const candidate = normalizeArabicStudentKey(entryName);
+    if (!candidate) return false;
+    if (normCode && candidate === normCode) return true;
+    if (!normName) return false;
+    if (candidate === normName) return true;
+    // Match if full student name tokens (at least first + second/last name) all appear in candidate
+    if (nameTokens.length >= 2) {
+      return nameTokens.slice(0, 2).every((tok) => candidate.includes(tok));
+    }
+    return false;
+  };
+
+  return records
+    .filter((r) => {
+      if (r.approvalStatus !== 'approved') return false;
+      if (targetGrade && String(r.grade).trim() !== targetGrade) return false;
+      return true;
+    })
+    .reduce<StudentOwnAttendanceItem[]>((acc, rec) => {
+      const ownEntry = (rec.entries || []).find((e) => isThisStudent(e.studentName));
+      if (ownEntry) {
+        acc.push({
+          id: rec.id,
+          date: rec.date,
+          gradeLabel: rec.gradeLabel,
+          classNumber: rec.classNumber || '1',
+          status: ownEntry.status === 'غائب' ? 'غائب بدون عذر' : ownEntry.status,
+          note: ownEntry.note,
+          recordedBy: rec.recordedBy,
+        });
+      }
+      return acc;
+    }, [])
+    .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
 };
 
 interface StudentDashboardProps {
@@ -115,13 +159,24 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
   };
   const gradeLabel = getGradeTitle(studentGrade);
 
-  // 5 Bottom Tabs: 'school_board' (لوحة المدرسة) | 'homework' (واجباتي) | 'announcements' (التعاميم) | 'grades' (درجاتي) | 'recommendations' (توصيات المعلم) + 'schedule' view
-  const [navTab, setNavTab] = useState<'school_board' | 'homework' | 'announcements' | 'grades' | 'recommendations' | 'account' | 'schedule'>('school_board');
+  // 5 Bottom Tabs: 'school_board' (لوحة المدرسة) | 'homework' (واجباتي) | 'announcements' (التعاميم) | 'grades' (درجاتي) | 'recommendations' (توصيات المعلم) + 'schedule' & private 'attendance' view
+  const [navTab, setNavTab] = useState<'school_board' | 'homework' | 'announcements' | 'grades' | 'recommendations' | 'account' | 'schedule' | 'attendance'>('school_board');
   const [approvedGradeSchedules, setApprovedGradeSchedules] = useState<ClassSchedule[]>(() =>
     session.schoolId
       ? appDataService
           .getClassSchedules(session.schoolId)
           .filter((s) => s.isApproved && String(s.grade).trim() === String(studentGrade).trim())
+      : []
+  );
+  // Strictly isolated personal attendance: ONLY this student's own approved records (never classmates)
+  const [myAttendanceLogs, setMyAttendanceLogs] = useState<StudentOwnAttendanceItem[]>(() =>
+    session.schoolId
+      ? extractStudentOwnAttendance(
+          appDataService.getAttendanceRecords(session.schoolId),
+          session.name,
+          session.code,
+          studentGrade
+        )
       : []
   );
 
@@ -674,6 +729,39 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
       }
     } catch (_) {}
 
+    // 9. Direct Firestore query: Approved Attendance strictly filtered to THIS student ONLY
+    let unsubOwnAttendance = () => {};
+    try {
+      if (currentUser?.schoolId) {
+        const normalizedSchool = currentUser.schoolId.trim().toLowerCase();
+        const qAtt = query(
+          collection(db, 'attendance_records'),
+          where('schoolId', '==', currentUser.schoolId)
+        );
+        unsubOwnAttendance = onSnapshot(
+          qAtt,
+          (snap) => {
+            const rawRecords = snap.docs
+              .map((d) => ({ ...d.data(), id: d.id } as AttendanceRecord))
+              .filter((r) => (r.schoolId || '').trim().toLowerCase() === normalizedSchool);
+            setMyAttendanceLogs(
+              extractStudentOwnAttendance(rawRecords, currentUser.name, currentUser.code, studentGrade)
+            );
+          },
+          () => {
+            setMyAttendanceLogs(
+              extractStudentOwnAttendance(
+                appDataService.getAttendanceRecords(currentUser.schoolId),
+                currentUser.name,
+                currentUser.code,
+                studentGrade
+              )
+            );
+          }
+        );
+      }
+    } catch (_) {}
+
     return () => {
       unsubAppData();
       unsubQuestions();
@@ -683,8 +771,9 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
       unsubGb();
       unsubHwArchive();
       unsubSchedules();
+      unsubOwnAttendance();
     };
-  }, [studentGrade, studentClass, session.schoolId, session.code]);
+  }, [studentGrade, studentClass, session.schoolId, session.code, session.name]);
 
   // Points start strictly from 0 and match the number and grades of completed homeworks in the active month
   const totalStudentScore = useMemo(() => {
@@ -881,17 +970,17 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
 
   const handleImageFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      try {
-        const compressed = await compressImage(file, 1200, 0.7);
-        setSelectedImage(compressed);
-      } catch {
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          setSelectedImage(reader.result as string);
-        };
-        reader.readAsDataURL(file);
-      }
+    e.target.value = '';
+    if (!file) return;
+    try {
+      const { dataUrl } = await compressImageFile(file, {
+        maxDimension: 1280,
+        quality: 0.75,
+      });
+      setSelectedImage(dataUrl);
+    } catch (err: any) {
+      setToastMsg(err?.message || 'يُسمح برفع الصور فقط (ممنوع رفع الفيديو).');
+      window.setTimeout(() => setToastMsg(null), 4000);
     }
   };
 
@@ -1200,36 +1289,70 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
               schoolId={session.schoolId}
               schoolName={formatArabicSchoolName(session.schoolName, session.schoolId)}
               topSlot={
-                <button
-                  type="button"
-                  onClick={() => setNavTab('schedule')}
-                  className="w-full bg-white rounded-2xl p-4 sm:p-5 border border-[#DCE7F3] hover:border-[#9BBEDF] shadow-xs hover:bg-[#F4F8FD] transition flex items-center justify-between gap-4 cursor-pointer text-right"
-                >
-                  <div className="flex items-center gap-3 min-w-0">
-                    <div className="p-2.5 rounded-xl bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] shrink-0">
-                      <Calendar className="w-5 h-5" />
-                    </div>
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <h3 className="font-black text-sm sm:text-base text-[#1A3A5F]">
-                          جدول الحصص الأسبوعي — الترم الأول
-                        </h3>
-                        <span className="px-2 py-0.5 rounded-full bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] text-[10px] font-black">
-                          {gradeLabel}
-                        </span>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setNavTab('schedule')}
+                    className="w-full bg-white rounded-2xl p-4 sm:p-5 border border-[#DCE7F3] hover:border-[#9BBEDF] shadow-xs hover:bg-[#F4F8FD] transition flex items-center justify-between gap-3 cursor-pointer text-right"
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="p-2.5 rounded-xl bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] shrink-0">
+                        <Calendar className="w-5 h-5" />
                       </div>
-                      <p className="text-xs text-[#5C7085] font-semibold mt-0.5">
-                        {approvedGradeSchedules.length > 0
-                          ? `الجدول المعتمد والثابت لصفك (${approvedGradeSchedules.length} فصل معتمد)`
-                          : 'اضغط لعرض جدول حصص صفك فور اعتماده من مدير المدرسة'}
-                      </p>
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <h3 className="font-black text-sm text-[#1A3A5F]">
+                            جدول الحصص الأسبوعي — الترم الأول
+                          </h3>
+                          <span className="px-2 py-0.5 rounded-full bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] text-[10px] font-black">
+                            {gradeLabel}
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-[#5C7085] font-semibold mt-0.5 truncate">
+                          {approvedGradeSchedules.length > 0
+                            ? `الجدول المعتمد (${approvedGradeSchedules.length} فصل)`
+                            : 'جدول صفك فور اعتماده'}
+                        </p>
+                      </div>
                     </div>
-                  </div>
-                  <div className="flex items-center gap-1 text-xs font-black text-[#1F5AAA] shrink-0">
-                    <span>عرض الجدول</span>
-                    <ChevronLeft className="w-4 h-4" />
-                  </div>
-                </button>
+                    <div className="flex items-center gap-1 text-xs font-black text-[#1F5AAA] shrink-0">
+                      <span>عرض</span>
+                      <ChevronLeft className="w-4 h-4" />
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setNavTab('attendance')}
+                    className="w-full bg-white rounded-2xl p-4 sm:p-5 border border-[#DCE7F3] hover:border-[#9BBEDF] shadow-xs hover:bg-[#F4F8FD] transition flex items-center justify-between gap-3 cursor-pointer text-right"
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="p-2.5 rounded-xl bg-emerald-50 text-emerald-700 border border-emerald-200 shrink-0">
+                        <UserCheck className="w-5 h-5" />
+                      </div>
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <h3 className="font-black text-sm text-[#1A3A5F]">
+                            سجل حضوري وغيابي الخاص
+                          </h3>
+                          <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 text-[10px] font-black inline-flex items-center gap-1">
+                            <Lock className="w-2.5 h-2.5" />
+                            <span>خاص بك فقط</span>
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-[#5C7085] font-semibold mt-0.5 truncate">
+                          {myAttendanceLogs.length > 0
+                            ? `إجمالي السجلات المسجلة لك: ${myAttendanceLogs.length}`
+                            : 'لا توجد سجلات حضور مسجلة لحسابك بعد'}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1 text-xs font-black text-[#1F5AAA] shrink-0">
+                      <span>عرض</span>
+                      <ChevronLeft className="w-4 h-4" />
+                    </div>
+                  </button>
+                </div>
               }
             />
           </div>
@@ -2213,6 +2336,114 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
             )}
           </div>
         )}
+
+        {/* TAB: STUDENT PRIVATE ATTENDANCE & ABSENCE (Strictly this student ONLY) */}
+        {navTab === 'attendance' && (
+          <div className="space-y-4">
+            <div className="bg-white rounded-2xl p-4 sm:p-5 border border-[#DCE7F3] shadow-sm flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="font-black text-base sm:text-lg text-[#1A3A5F] flex items-center gap-2">
+                  <UserCheck className="w-5 h-5 text-emerald-700 shrink-0" />
+                  <span>سجل حضوري وغيابي الخاص — {session.name}</span>
+                </h2>
+                <p className="text-xs text-[#5C7085] font-semibold mt-0.5 flex items-center gap-1.5">
+                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+                  <span>هذا السجل خاص بحسابك فقط ({gradeLabel}) ولا يظهر لك حضور أو غياب أي زميل آخر.</span>
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setNavTab('school_board')}
+                className="px-3.5 py-2 rounded-xl bg-[#EEF5FC] hover:bg-[#DCEAF9] text-[#1F5AAA] border border-[#C6DCF2] text-xs font-black cursor-pointer transition"
+              >
+                العودة للوحة المدرسة
+              </button>
+            </div>
+
+            {(() => {
+              const presentCnt = myAttendanceLogs.filter((l) => l.status === 'حاضر').length;
+              const excusedCnt = myAttendanceLogs.filter((l) => l.status === 'غائب بعذر').length;
+              const unexcusedCnt = myAttendanceLogs.filter((l) => l.status === 'غائب بدون عذر').length;
+              const lateCnt = myAttendanceLogs.filter((l) => l.status === 'متأخر').length;
+
+              return (
+                <>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                    <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-3 text-center">
+                      <div className="text-[11px] font-black text-emerald-800">أيام الحضور</div>
+                      <div className="text-xl font-black text-emerald-900 tabular-nums mt-0.5">{presentCnt}</div>
+                    </div>
+                    <div className="bg-sky-50 border border-[#C6DCF2] rounded-2xl p-3 text-center">
+                      <div className="text-[11px] font-black text-[#1F5AAA]">غائب بعذر</div>
+                      <div className="text-xl font-black text-[#1A3A5F] tabular-nums mt-0.5">{excusedCnt}</div>
+                    </div>
+                    <div className="bg-rose-50 border border-rose-200 rounded-2xl p-3 text-center">
+                      <div className="text-[11px] font-black text-rose-800">غائب بدون عذر</div>
+                      <div className="text-xl font-black text-rose-900 tabular-nums mt-0.5">{unexcusedCnt}</div>
+                    </div>
+                    <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3 text-center">
+                      <div className="text-[11px] font-black text-amber-900">تأخر</div>
+                      <div className="text-xl font-black text-amber-950 tabular-nums mt-0.5">{lateCnt}</div>
+                    </div>
+                  </div>
+
+                  {myAttendanceLogs.length === 0 ? (
+                    <div className="bg-white rounded-2xl p-8 border border-[#DCE7F3] text-center space-y-2 shadow-sm">
+                      <UserCheck className="w-10 h-10 text-[#9BBEDF] mx-auto" />
+                      <h3 className="font-black text-sm text-[#1A3A5F]">
+                        لا توجد سجلات حضور أو غياب مسجلة باسمك حتى الآن
+                      </h3>
+                      <p className="text-xs text-[#5C7085] font-semibold max-w-md mx-auto leading-relaxed">
+                        عند تسجيل المشرف لحضور صفك واعتماده من مدير المدرسة، ستظهر حالتك الشخصية هنا فقط.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="space-y-2.5">
+                      {myAttendanceLogs.map((log) => {
+                        const badgeCls =
+                          log.status === 'حاضر'
+                            ? 'bg-emerald-600 text-white'
+                            : log.status === 'غائب بعذر'
+                            ? 'bg-[#1F5AAA] text-white'
+                            : log.status === 'متأخر'
+                            ? 'bg-amber-500 text-white'
+                            : 'bg-rose-600 text-white';
+                        return (
+                          <div
+                            key={log.id}
+                            className="bg-white rounded-2xl p-4 border border-[#DCE7F3] shadow-2xs flex flex-wrap items-center justify-between gap-3"
+                          >
+                            <div className="space-y-1">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className={`px-3 py-1 rounded-full text-xs font-black ${badgeCls}`}>
+                                  {log.status}
+                                </span>
+                                <span className="font-black text-sm text-[#1A3A5F] tabular-nums">
+                                  {log.date}
+                                </span>
+                                <span className="text-xs font-bold text-[#5C7085]">
+                                  {log.gradeLabel} — فصل {log.classNumber}
+                                </span>
+                              </div>
+                              {log.note && (
+                                <p className="text-xs font-semibold text-[#1A3A5F]">
+                                  ملاحظة: {log.note}
+                                </p>
+                              )}
+                            </div>
+                            <span className="text-[11px] font-semibold text-[#5C7085]">
+                              بواسطة: {log.recordedBy}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </>
+              );
+            })()}
+          </div>
+        )}
       </div>
 
       {/* Floating Bottom Navigation Bar: Clean Crisp White matching Reference Screenshot */}
@@ -2468,7 +2699,13 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
         isOpen={isSidebarOpen}
         onClose={() => setIsSidebarOpen(false)}
         session={session}
-        activeView={navTab === 'schedule' ? 'schedule' : (activeArchiveModal || 'dashboard')}
+        activeView={
+          navTab === 'schedule'
+            ? 'schedule'
+            : navTab === 'attendance'
+            ? 'student_attendance'
+            : activeArchiveModal || 'dashboard'
+        }
         onSelectView={(v: string) => {
           if (v === 'dashboard') {
             setActiveArchiveModal(null);
@@ -2476,6 +2713,9 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
           } else if (v === 'schedule') {
             setActiveArchiveModal(null);
             setNavTab('schedule');
+          } else if (v === 'student_attendance') {
+            setActiveArchiveModal(null);
+            setNavTab('attendance');
           } else {
             setActiveArchiveModal(v as StudentArchiveSection);
           }

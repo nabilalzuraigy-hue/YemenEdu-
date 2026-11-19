@@ -19,6 +19,7 @@ import {
   AlertTriangle,
   BookOpen,
   Activity,
+  UserCheck,
 } from 'lucide-react';
 import { UserSession } from '../services/authService';
 import { formatArabicSchoolName, getUserInitials } from '../utils/schoolDisplay';
@@ -33,6 +34,7 @@ export type StudentArchiveSection =
 export type UnifiedSidebarView =
   | 'dashboard'
   | 'schedule'
+  | 'student_attendance'
   | 'supervisor_activities'
   | 'supervisor_attendance'
   | 'supervisor_schedule'
@@ -247,6 +249,25 @@ export const UnifiedSidebar: React.FC<UnifiedSidebarProps> = ({
                 >
                   <CalendarCheck className="w-4 h-4 text-white/90 shrink-0" />
                   <span className="truncate">جدول الحصص الأسبوعي (الترم الأول)</span>
+                </button>
+              )}
+
+              {/* Private Personal Attendance shortcut for Student ONLY */}
+              {session.role === 'student' && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onSelectView('student_attendance');
+                    onClose();
+                  }}
+                  className={`w-full min-h-[44px] px-3 py-2.5 rounded-xl text-sm font-extrabold flex items-center gap-2.5 transition cursor-pointer ${
+                    activeView === 'student_attendance'
+                      ? 'bg-white/18 text-white border-r-4 border-white shadow-2xs'
+                      : 'text-white/95 hover:bg-white/10'
+                  }`}
+                >
+                  <UserCheck className="w-4 h-4 text-white/90 shrink-0" />
+                  <span className="truncate">سجل حضوري وغيابي الخاص</span>
                 </button>
               )}
 

@@ -281,6 +281,233 @@ async function startServer() {
     }
   });
 
+  // Voice-first report drafting: transcribes Arabic/dialect audio then drafts a concise, formal Arabic report
+  app.post('/api/gemini/draft-report-from-voice', async (req, res) => {
+    try {
+      const {
+        audioBase64,
+        mimeType,
+        category,
+        subType,
+        targetGrade,
+        targetClass,
+        activityDate,
+      } = req.body || {};
+
+      if (!audioBase64 || typeof audioBase64 !== 'string') {
+        res.status(400).json({ error: 'يرجى تسجيل الصوت أولاً قبل طلب الصياغة.' });
+        return;
+      }
+
+      const cleanMime = String(mimeType || 'audio/webm').split(';')[0].trim() || 'audio/webm';
+      if (cleanMime.startsWith('video/')) {
+        res.status(400).json({ error: 'ممنوع رفع الفيديو، يُسمح بالصوت فقط.' });
+        return;
+      }
+
+      const rawAudioData = audioBase64.includes(',')
+        ? audioBase64.split(',')[1] || ''
+        : audioBase64.trim();
+      if (!rawAudioData) {
+        res.status(400).json({ error: 'ملف التسجيل الصوتي فارغ.' });
+        return;
+      }
+
+      const ai = createGeminiClient();
+      const audioPart = {
+        inlineData: {
+          mimeType: cleanMime,
+          data: rawAudioData,
+        },
+      };
+
+      // Step 1: Transcribe audio cleanly using gemini-3.5-transcribe (fallback to gemini-4-hydrogen if container format fails)
+      let transcript = '';
+      try {
+        const transcribeRes = await ai.models.generateContent({
+          model: 'gemini-3.5-transcribe',
+          contents: {
+            parts: [
+              audioPart,
+              {
+                text: 'استمع للتسجيل الصوتي بدقة واكتب النص المنطوق بالعربية كما هو (بما في ذلك اللهجة العامية اليمنية أو العربية)، دون إضافة تعليقات من عندك.',
+              },
+            ],
+          },
+        });
+        transcript = (transcribeRes.text || '').trim();
+      } catch (transcribeErr) {
+        console.warn('[Gemini Transcribe fallback to 4-hydrogen]:', transcribeErr);
+      }
+
+      const contextDesc = `التصنيف: ${category || 'تقرير'} (${subType || 'عام'})، الصف: ${targetGrade || 'الكل'}، الفصل: ${targetClass || 'الكل'}، التاريخ: ${activityDate || ''}`;
+
+      if (transcript) {
+        const formalRes = await ai.models.generateContent({
+          model: MODEL_ID,
+          contents: `أنت سكرتير إداري وتربوي محترف في مدرسة يمنية.
+سياق المنشور: ${contextDesc}
+النص الأصلي الذي نطقه المشرف (قد يكون باللهجة العامية):
+"""
+${transcript}
+"""
+
+المطلوب:
+1) صغ عنواناً رسمياً موجزاً ومناسباً في حقل suggestedTitle.
+2) صغ من النص الأصلي تقريراً/وصفاً رسمياً مرتباً ومختصراً باللغة العربية الفصحى السليمة في حقل formalReport (بدون حشو أو مبالغة أو اختلاق وقائع غير موجودة في كلام المشرف، وبنقاط منظمة أو فقرة مهنية قصيرة واضحة).
+أعد النتيجة بصيغة JSON فقط.`,
+          config: {
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                suggestedTitle: { type: Type.STRING },
+                formalReport: { type: Type.STRING },
+              },
+              required: ['suggestedTitle', 'formalReport'],
+            },
+          },
+        });
+
+        const parsed = JSON.parse(formalRes.text || '{}');
+        res.json({
+          transcript,
+          suggestedTitle: String(parsed.suggestedTitle || '').trim(),
+          formalReport: String(parsed.formalReport || '').trim(),
+        });
+        return;
+      }
+
+      // Single-step multimodal fallback if transcription model didn't extract text
+      const fallbackRes = await ai.models.generateContent({
+        model: MODEL_ID,
+        contents: {
+          parts: [
+            audioPart,
+            {
+              text: `استمع إلى التسجيل الصوتي للمشرف المدرسي (قد يتحدث بالعامية).
+سياق المنشور: ${contextDesc}
+المطلوب في JSON:
+1) transcript: تفريغ دقيق لما قاله المشرف كما نطقه.
+2) suggestedTitle: عنوان رسمي موجز ومناسب.
+3) formalReport: صياغة التقرير باللغة العربية الفصحى الرسمية المرتبة والمختصرة دون اختلاق معلومات غير مذكورة.`,
+            },
+          ],
+        },
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              transcript: { type: Type.STRING },
+              suggestedTitle: { type: Type.STRING },
+              formalReport: { type: Type.STRING },
+            },
+            required: ['transcript', 'suggestedTitle', 'formalReport'],
+          },
+        },
+      });
+
+      const parsedFallback = JSON.parse(fallbackRes.text || '{}');
+      res.json({
+        transcript: String(parsedFallback.transcript || '').trim(),
+        suggestedTitle: String(parsedFallback.suggestedTitle || '').trim(),
+        formalReport: String(parsedFallback.formalReport || '').trim(),
+      });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'تعذر تحويل التسجيل الصوتي إلى تقرير رسمي';
+      console.error('[Gemini Voice Report Error]:', msg);
+      res.status(500).json({ error: msg });
+    }
+  });
+
+  // Image + One-line caption report drafting
+  app.post('/api/gemini/draft-report-from-image', async (req, res) => {
+    try {
+      const {
+        images,
+        oneLineNote,
+        category,
+        subType,
+        targetGrade,
+        targetClass,
+        activityDate,
+      } = req.body || {};
+
+      const imageList: Array<{ base64?: string; mimeType?: string }> = Array.isArray(images)
+        ? images.slice(0, 3)
+        : [];
+      const cleanOneLine = String(oneLineNote || '').trim();
+
+      if (imageList.length === 0 || !imageList[0]?.base64) {
+        res.status(400).json({ error: 'يرجى إرفاق صورة واحدة على الأقل.' });
+        return;
+      }
+      if (!cleanOneLine) {
+        res.status(400).json({ error: 'يرجى كتابة سطر واحد توضيحي مع الصورة.' });
+        return;
+      }
+
+      const ai = createGeminiClient();
+      const imageParts = imageList
+        .filter((item) => item && typeof item.base64 === 'string' && item.base64.trim().length > 0)
+        .map((item) => {
+          const img = extractBase64Image(item.base64 || '', item.mimeType || 'image/jpeg');
+          return {
+            inlineData: {
+              mimeType: img.mimeType,
+              data: img.data,
+            },
+          };
+        });
+
+      const response = await ai.models.generateContent({
+        model: MODEL_ID,
+        contents: {
+          parts: [
+            ...imageParts,
+            {
+              text: `أنت مشرف ومنسق إعلامي وتربوي في مدرسة يمنية.
+تأمل الصور المرفقة واقرأ ملاحظة المشرف المختصرة (سطر واحد):
+"${cleanOneLine}"
+
+معلومات المنشور:
+- التصنيف: ${category || 'نشاط'} (${subType || 'عام'})
+- الصف: ${targetGrade || 'الكل'}
+- الفصل: ${targetClass || 'الكل'}
+- التاريخ: ${activityDate || ''}
+
+المطلوب إرجاع JSON يحتوي على:
+1) suggestedTitle: عنوان رسمي جذاب وموجز يعبر عن الصورة والسطر التوضيحي.
+2) formalReport: وصف وتقرير متكامل ومرتب ومختصر باللغة العربية الفصحى الرسمية يدمج ما يظهر في الصورة مع ملاحظة المشرف بدقة واحترافية (بدون اختلاق تفاصيل مناقضة للصورة).`,
+            },
+          ],
+        },
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              suggestedTitle: { type: Type.STRING },
+              formalReport: { type: Type.STRING },
+            },
+            required: ['suggestedTitle', 'formalReport'],
+          },
+        },
+      });
+
+      const parsed = JSON.parse(response.text || '{}');
+      res.json({
+        suggestedTitle: String(parsed.suggestedTitle || '').trim(),
+        formalReport: String(parsed.formalReport || '').trim(),
+      });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'تعذر صياغة التقرير من الصورة';
+      console.error('[Gemini Image Report Error]:', msg);
+      res.status(500).json({ error: msg });
+    }
+  });
+
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({

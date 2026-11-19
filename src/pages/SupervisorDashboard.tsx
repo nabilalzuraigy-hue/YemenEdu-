@@ -27,10 +27,19 @@ import {
   Compass,
   Edit3,
   X,
+  Bell,
+  CheckCheck,
+  Mic,
+  Square,
+  Volume2,
+  ShieldCheck,
 } from 'lucide-react';
+import { collection, query, where, onSnapshot } from 'firebase/firestore';
+import { db } from '../firebase/config';
 import { UserSession, authService, ALL_SUBJECTS } from '../services/authService';
 import {
   appDataService,
+  AppNotification,
   AttendanceEntry,
   AttendanceRecord,
   AttendanceStatus,
@@ -41,6 +50,7 @@ import {
   ScheduleSlot,
   SupervisorActivity,
   SupervisorActivityCategory,
+  SupervisorReportInputType,
   SUPERVISOR_PRIMARY_CATEGORIES,
   SUPERVISOR_SUBTYPES_MAP,
   getGradeLabelAr,
@@ -49,45 +59,32 @@ import { UnifiedSidebar, UnifiedSidebarView } from '../components/UnifiedSidebar
 import { ScheduleGridView } from '../components/ScheduleGridView';
 import { getApprovalBadgeAndFrame } from '../components/PrincipalInboxTab';
 import { formatArabicSchoolName } from '../utils/schoolDisplay';
+import { compressImageFile, recompressDataUrl } from '../utils/imageCompression';
+import { playGentleNotificationSound } from '../services/soundUtils';
 
 interface SupervisorDashboardProps {
   session: UserSession;
 }
 
-const compressImageForGemini = (file: File, maxWidth = 1400, quality = 0.8): Promise<{ dataUrl: string; base64: string; mimeType: string }> => {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const img = new Image();
-      img.onload = () => {
-        let width = img.width;
-        let height = img.height;
-        if (width > maxWidth) {
-          height = Math.round((height * maxWidth) / width);
-          width = maxWidth;
-        }
-        const canvas = document.createElement('canvas');
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) {
-          const raw = String(event.target?.result || '');
-          const base64 = raw.split(',')[1] || '';
-          resolve({ dataUrl: raw, base64, mimeType: file.type || 'image/jpeg' });
-          return;
-        }
-        ctx.drawImage(img, 0, 0, width, height);
-        const dataUrl = canvas.toDataURL('image/jpeg', quality);
-        const base64 = dataUrl.split(',')[1] || '';
-        resolve({ dataUrl, base64, mimeType: 'image/jpeg' });
-      };
-      img.onerror = () => reject(new Error('تعذر قراءة ملف الصورة'));
-      img.src = String(event.target?.result || '');
-    };
-    reader.onerror = () => reject(new Error('تعذر فتح ملف الصورة'));
-    reader.readAsDataURL(file);
-  });
+const MAX_VOICE_SECONDS = 120;
+
+const formatMmSs = (secs: number) => {
+  const s = Math.max(0, Math.floor(secs));
+  const mm = String(Math.floor(s / 60)).padStart(2, '0');
+  const ss = String(s % 60).padStart(2, '0');
+  return `${mm}:${ss}`;
 };
+
+const blobToBase64 = (blob: Blob): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const res = String(reader.result || '');
+      resolve(res.includes(',') ? res.split(',')[1] || '' : res);
+    };
+    reader.onerror = () => reject(new Error('تعذر قراءة الملف الصوتي'));
+    reader.readAsDataURL(blob);
+  });
 
 const getTodayIsoDate = () => {
   const d = new Date();
@@ -183,15 +180,44 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
       .filter(Boolean);
   }, [schoolId]);
 
-  // --- TAB 1: ACTIVITIES STATE (تقرير / نشاط / فعالية + 3 صور -> إرسال إلى المدير للاعتماد) ---
+  // Supervisor Workflow Notifications ("تم اعتماد تقريرك ونشره" / "تم رفض تقريرك، السبب: ...")
+  const [supervisorNotifications, setSupervisorNotifications] = useState<AppNotification[]>(() =>
+    appDataService.getNotifications(schoolId, 'supervisor', session.code)
+  );
+  const [showNotifPanel, setShowNotifPanel] = useState(false);
+  const seenNotifIdsRef = useRef<Set<string>>(new Set());
+  const notifBootstrappedRef = useRef(false);
+
+  // --- TAB 1: ACTIVITIES STATE (تقرير / نشاط / فعالية بالصوت أو الصورة+سطر + مراجعة المشرف -> إرسال للمدير) ---
   const [selectedActivityBranch, setSelectedActivityBranch] = useState<'الكل' | 'تقرير' | 'نشاط' | 'فعالية'>('الكل');
   const [actCategory, setActCategory] = useState<'تقرير' | 'نشاط' | 'فعالية'>('تقرير');
   const [actSubType, setActSubType] = useState<string>(SUPERVISOR_SUBTYPES_MAP['تقرير'][0]);
+  const [actTargetGrade, setActTargetGrade] = useState('الكل');
+  const [actTargetClass, setActTargetClass] = useState('الكل');
+  const [actDate, setActDate] = useState<string>(() => getTodayIsoDate());
+
+  // AI Creation Modes: 'voice' (الأساسية: تسجيل حتى دقيقتين) | 'image' (الثانية: صورة + سطر واحد)
+  const [aiCreationMode, setAiCreationMode] = useState<'voice' | 'image'>('voice');
+  const [actInputType, setActInputType] = useState<SupervisorReportInputType>('صوت');
+  const [actOriginalText, setActOriginalText] = useState('');
+  const [oneLineNote, setOneLineNote] = useState('');
+  const [actAudioUrl, setActAudioUrl] = useState('');
+  const [recordedAudioPreviewUrl, setRecordedAudioPreviewUrl] = useState<string | null>(null);
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [isDraftingReport, setIsDraftingReport] = useState(false);
+  const [aiDraftError, setAiDraftError] = useState<string | null>(null);
+  const [hasAiDraftReady, setHasAiDraftReady] = useState(false);
+  const [hasReviewedDraft, setHasReviewedDraft] = useState(false);
+
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const recordingTimerRef = useRef<number | null>(null);
+
   const [actTitle, setActTitle] = useState('');
   const [actDetails, setActDetails] = useState('');
   const [actImages, setActImages] = useState<string[]>([]);
-  const [actTargetGrade, setActTargetGrade] = useState('الكل');
-  const [actDate, setActDate] = useState<string>(() => getTodayIsoDate());
   const [editingActivityId, setEditingActivityId] = useState<string | null>(null);
   const [isSavingActivity, setIsSavingActivity] = useState(false);
   const actCameraRef = useRef<HTMLInputElement | null>(null);
@@ -238,17 +264,78 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
       setActivities(appDataService.getSupervisorActivities(schoolId));
       setAttendanceRecords(appDataService.getAttendanceRecords(schoolId));
       setClassSchedules(appDataService.getClassSchedules(schoolId));
+      setSupervisorNotifications(appDataService.getNotifications(schoolId, 'supervisor', session.code));
     };
     sync();
     const unsub = appDataService.subscribe(sync);
-    return () => unsub();
-  }, [schoolId]);
+
+    let unsubNotifs = () => {};
+    if (schoolId) {
+      const normalizedSchool = schoolId.trim().toLowerCase();
+      try {
+        unsubNotifs = onSnapshot(
+          query(collection(db, 'notifications'), where('schoolId', '==', schoolId)),
+          (snap) => {
+            const list = snap.docs
+              .map((d) => ({ ...d.data(), id: d.id } as AppNotification))
+              .filter((n) => {
+                if ((n.schoolId || '').trim().toLowerCase() !== normalizedSchool) return false;
+                if (n.recipientRole !== 'supervisor') return false;
+                if (
+                  session.code &&
+                  n.recipientCode &&
+                  n.recipientCode.trim().toUpperCase() !== session.code.trim().toUpperCase()
+                ) {
+                  return false;
+                }
+                return true;
+              })
+              .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+
+            if (notifBootstrappedRef.current) {
+              const hasFreshUnread = list.some(
+                (n) => !n.isRead && !seenNotifIdsRef.current.has(n.id)
+              );
+              if (hasFreshUnread) {
+                playGentleNotificationSound();
+              }
+            } else {
+              notifBootstrappedRef.current = true;
+            }
+            list.forEach((n) => seenNotifIdsRef.current.add(n.id));
+            setSupervisorNotifications(list);
+          },
+          () => {}
+        );
+      } catch {}
+    }
+
+    return () => {
+      unsub();
+      unsubNotifs();
+    };
+  }, [schoolId, session.code]);
+
+  // Cleanup active mic stream / preview URL on unmount
+  useEffect(() => {
+    return () => {
+      if (recordingTimerRef.current) {
+        window.clearInterval(recordingTimerRef.current);
+      }
+      if (mediaStreamRef.current) {
+        mediaStreamRef.current.getTracks().forEach((t) => t.stop());
+      }
+      if (recordedAudioPreviewUrl) {
+        URL.revokeObjectURL(recordedAudioPreviewUrl);
+      }
+    };
+  }, [recordedAudioPreviewUrl]);
 
   const showToast = (type: 'success' | 'error' | 'info', text: string) => {
     setToast({ type, text });
     window.setTimeout(() => {
       setToast((prev) => (prev?.text === text ? null : prev));
-    }, 5000);
+    }, 5500);
   };
 
   const handleSelectSidebarView = (view: UnifiedSidebarView) => {
@@ -261,7 +348,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
     }
   };
 
-  // --- Activity Handlers ---
+  // --- Activity & Voice/Image AI Drafting Handlers ---
   const handleSelectBranch = (branch: 'الكل' | 'تقرير' | 'نشاط' | 'فعالية') => {
     setSelectedActivityBranch(branch);
     if (branch !== 'الكل') {
@@ -285,23 +372,268 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
     const compressedUrls: string[] = [];
     for (const file of picked) {
       try {
-        const { dataUrl } = await compressImageForGemini(file, 850, 0.65);
+        const { dataUrl } = await compressImageFile(file, { maxDimension: 1280, quality: 0.75 });
         if (dataUrl) compressedUrls.push(dataUrl);
-      } catch {
-        // skip unreadable file
+      } catch (err: any) {
+        showToast('error', err?.message || 'يُسمح برفع الصور فقط (ممنوع رفع الفيديو).');
       }
     }
 
     if (compressedUrls.length > 0) {
-      setActImages((prev) => {
-        const next = [...prev, ...compressedUrls].slice(0, 3);
-        const totalSize = next.reduce((sum, img) => sum + img.length, 0);
-        if (totalSize > 750_000) {
-          showToast('error', 'حجم الصور كبير جداً، يرجى تقليل دقة الصور أو عددها.');
-          return prev;
-        }
-        return next;
+      let combined = [...actImages, ...compressedUrls].slice(0, 3);
+      let totalSize = combined.reduce((sum, img) => sum + img.length, 0);
+      if (totalSize > 750_000) {
+        combined = await Promise.all(combined.map((url) => recompressDataUrl(url, 960, 0.7)));
+        totalSize = combined.reduce((sum, img) => sum + img.length, 0);
+      }
+      if (totalSize > 850_000) {
+        showToast('error', 'حجم الصور كبير جداً، يرجى تقليل عدد الصور.');
+        return;
+      }
+      setActImages(combined);
+    }
+  };
+
+  const processRecordedVoiceBlob = async (audioBlob: Blob) => {
+    setAiDraftError(null);
+    setIsDraftingReport(true);
+    setHasReviewedDraft(false);
+
+    if (recordedAudioPreviewUrl) {
+      URL.revokeObjectURL(recordedAudioPreviewUrl);
+    }
+    const localPreviewUrl = URL.createObjectURL(audioBlob);
+    setRecordedAudioPreviewUrl(localPreviewUrl);
+
+    try {
+      const [audioBase64, uploadedUrl] = await Promise.all([
+        blobToBase64(audioBlob),
+        appDataService.uploadSupervisorAudio(schoolId, audioBlob),
+      ]);
+
+      const response = await fetch('/api/gemini/draft-report-from-voice', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          audioBase64,
+          mimeType: audioBlob.type || 'audio/webm',
+          category: actCategory,
+          subType: actSubType,
+          targetGrade: actTargetGrade,
+          targetClass: actTargetClass,
+          activityDate: actDate,
+        }),
       });
+
+      const contentType = response.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        throw new Error('خدمة تحويل الصوت عبر Gemini غير متاحة في هذه البيئة.');
+      }
+
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload?.error || 'تعذر تحويل الصوت وصياغة التقرير.');
+      }
+
+      const transcript = String(payload?.transcript || '').trim();
+      const suggestedTitle = String(payload?.suggestedTitle || '').trim();
+      const formalReport = String(payload?.formalReport || '').trim();
+
+      if (!formalReport) {
+        throw new Error('لم يتم التقاط كلام واضح في التسجيل الصوتي، يرجى التحدث بوضوح والمحاولة مرة أخرى.');
+      }
+
+      setActInputType('صوت');
+      setActOriginalText(transcript || '(تسجيل صوتي)');
+      setActAudioUrl(uploadedUrl || '');
+      setActTitle(suggestedTitle || `${actCategory} - ${actSubType}`);
+      setActDetails(formalReport);
+      setHasAiDraftReady(true);
+      setHasReviewedDraft(false);
+      showToast('success', '✨ تم تحويل تسجيلك الصوتي وصياغة التقرير الرسمي. راجع النص وعدّل ما يلزم قبل الإرسال.');
+    } catch (err: any) {
+      setAiDraftError(err?.message || 'حدث خطأ أثناء معالجة التسجيل الصوتي.');
+      showToast('error', err?.message || 'حدث خطأ أثناء معالجة التسجيل الصوتي.');
+    } finally {
+      setIsDraftingReport(false);
+    }
+  };
+
+  const handleStartVoiceRecording = async () => {
+    if (isRecording || isDraftingReport) return;
+    setAiDraftError(null);
+
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+      const msg = 'متصفحك لا يدعم تسجيل الصوت بالميكروفون. يمكنك استخدام وضع الصورة + سطر واحد.';
+      setAiDraftError(msg);
+      showToast('error', msg);
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaStreamRef.current = stream;
+      audioChunksRef.current = [];
+
+      const mimeCandidates = [
+        'audio/webm;codecs=opus',
+        'audio/webm',
+        'audio/mp4',
+        'audio/ogg;codecs=opus',
+        'audio/ogg',
+      ];
+      const supportedMime = mimeCandidates.find((m) => {
+        try {
+          return MediaRecorder.isTypeSupported(m);
+        } catch {
+          return false;
+        }
+      });
+
+      const recorder = supportedMime
+        ? new MediaRecorder(stream, { mimeType: supportedMime })
+        : new MediaRecorder(stream);
+
+      mediaRecorderRef.current = recorder;
+
+      recorder.ondataavailable = (ev) => {
+        if (ev.data && ev.data.size > 0) {
+          audioChunksRef.current.push(ev.data);
+        }
+      };
+
+      recorder.onstop = async () => {
+        if (recordingTimerRef.current) {
+          window.clearInterval(recordingTimerRef.current);
+          recordingTimerRef.current = null;
+        }
+        if (mediaStreamRef.current) {
+          mediaStreamRef.current.getTracks().forEach((t) => t.stop());
+          mediaStreamRef.current = null;
+        }
+        setIsRecording(false);
+
+        const mime = recorder.mimeType || supportedMime || 'audio/webm';
+        const audioBlob = new Blob(audioChunksRef.current, { type: mime });
+        if (audioBlob.size < 256) {
+          setAiDraftError('التسجيل قصير جداً أو فارغ، يرجى الضغط للتسجيل والتحدث بوضوح.');
+          return;
+        }
+        await processRecordedVoiceBlob(audioBlob);
+      };
+
+      recorder.start(500);
+      setIsRecording(true);
+      setRecordingSeconds(0);
+
+      recordingTimerRef.current = window.setInterval(() => {
+        setRecordingSeconds((prev) => {
+          const next = prev + 1;
+          if (next >= MAX_VOICE_SECONDS) {
+            if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+              mediaRecorderRef.current.stop();
+            }
+            return MAX_VOICE_SECONDS;
+          }
+          return next;
+        });
+      }, 1000);
+    } catch (err: any) {
+      const msg =
+        err?.name === 'NotAllowedError'
+          ? 'تم رفض إذن الميكروفون، يرجى السماح بالوصول للميكروفون من إعدادات المتصفح.'
+          : err?.message || 'تعذر تشغيل الميكروفون.';
+      setAiDraftError(msg);
+      showToast('error', msg);
+    }
+  };
+
+  const handleStopVoiceRecording = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+      mediaRecorderRef.current.stop();
+    }
+  };
+
+  const handleDraftFromImageAndOneLine = async () => {
+    if (isDraftingReport) return;
+    if (actImages.length === 0) {
+      setAiDraftError('يرجى التقاط أو إرفاق صورة واحدة على الأقل للنشاط أو الحدث أولاً.');
+      return;
+    }
+    const cleanLine = oneLineNote.trim();
+    if (!cleanLine) {
+      setAiDraftError('يرجى كتابة سطر واحد توضيحي عن الصورة قبل الصياغة.');
+      return;
+    }
+
+    setAiDraftError(null);
+    setIsDraftingReport(true);
+    setHasReviewedDraft(false);
+
+    try {
+      const response = await fetch('/api/gemini/draft-report-from-image', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          images: actImages.map((imgUrl) => ({
+            base64: imgUrl,
+            mimeType: 'image/jpeg',
+          })),
+          oneLineNote: cleanLine,
+          category: actCategory,
+          subType: actSubType,
+          targetGrade: actTargetGrade,
+          targetClass: actTargetClass,
+          activityDate: actDate,
+        }),
+      });
+
+      const contentType = response.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        throw new Error('خدمة صياغة التقارير من الصور غير متاحة في هذه البيئة.');
+      }
+
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload?.error || 'تعذر صياغة التقرير من الصورة والسطر.');
+      }
+
+      const suggestedTitle = String(payload?.suggestedTitle || '').trim();
+      const formalReport = String(payload?.formalReport || '').trim();
+      if (!formalReport) {
+        throw new Error('لم يتمكن Gemini من صياغة الوصف، يرجى تجربة صورة أوضح.');
+      }
+
+      setActInputType('صورة');
+      setActOriginalText(cleanLine);
+      setActAudioUrl('');
+      setActTitle(suggestedTitle || cleanLine);
+      setActDetails(formalReport);
+      setHasAiDraftReady(true);
+      setHasReviewedDraft(false);
+      showToast('success', '✨ صاغ Gemini التقرير الكامل بناءً على الصورة والسطر. راجع النص وعدّله ثم أرسله للمدير.');
+    } catch (err: any) {
+      setAiDraftError(err?.message || 'حدث خطأ أثناء صياغة التقرير من الصورة.');
+      showToast('error', err?.message || 'حدث خطأ أثناء صياغة التقرير من الصورة.');
+    } finally {
+      setIsDraftingReport(false);
+    }
+  };
+
+  const resetActivityComposer = () => {
+    setEditingActivityId(null);
+    setActTitle('');
+    setActDetails('');
+    setActImages([]);
+    setActOriginalText('');
+    setOneLineNote('');
+    setActAudioUrl('');
+    setHasAiDraftReady(false);
+    setHasReviewedDraft(false);
+    setAiDraftError(null);
+    if (recordedAudioPreviewUrl) {
+      URL.revokeObjectURL(recordedAudioPreviewUrl);
+      setRecordedAudioPreviewUrl(null);
     }
   };
 
@@ -316,46 +648,74 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
         : subOptions[0];
     setActSubType(resolvedSub);
     setActTitle(act.title || '');
-    setActDetails(act.details || '');
+    setActDetails(act.formalText || act.details || '');
+    setActOriginalText(act.originalText || act.details || '');
+    setActInputType(act.inputType || 'صوت');
+    setActAudioUrl(act.audioUrl || '');
+    setAiCreationMode(act.inputType === 'صورة' ? 'image' : 'voice');
+    setOneLineNote(act.inputType === 'صورة' ? act.originalText || '' : '');
     setActImages(Array.isArray(act.images) ? act.images.slice(0, 3) : []);
     setActTargetGrade(act.targetGrade || 'الكل');
+    setActTargetClass(act.targetClass || 'الكل');
     setActDate(act.activityDate || getTodayIsoDate());
+    setHasAiDraftReady(true);
+    setHasReviewedDraft(false);
+    setAiDraftError(null);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   const handleCancelEditActivity = () => {
-    setEditingActivityId(null);
-    setActTitle('');
-    setActDetails('');
-    setActImages([]);
+    resetActivityComposer();
   };
 
   const handleCreateOrResubmitActivity = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!actTitle.trim() || !actDetails.trim() || isSavingActivity) return;
+    if (isSavingActivity) return;
 
-    const totalImgBytes = actImages.reduce((s, x) => s + x.length, 0);
+    if (!hasAiDraftReady) {
+      showToast('error', 'استخدم التسجيل الصوتي أو الصورة + سطر أولاً لتوليد المسودة ومراجعتها قبل الإرسال.');
+      return;
+    }
+    if (!actTitle.trim() || !actDetails.trim()) {
+      showToast('error', 'يرجى مراجعة عنوان التقرير والنص الرسمي قبل الإرسال.');
+      return;
+    }
+    if (!hasReviewedDraft) {
+      showToast('error', 'لا يمكن إرسال أي تقرير للمدير بدون مراجعة المشرف وتأكيد المراجعة أولاً.');
+      return;
+    }
+
+    let finalImages = actImages;
+    let totalImgBytes = finalImages.reduce((s, x) => s + x.length, 0);
     if (totalImgBytes > 750_000) {
-      showToast('error', 'حجم الصور المرفقة يتجاوز الحد المسموح، يرجى حذف صورة أو اختيار صورة أصغر.');
+      finalImages = await Promise.all(finalImages.map((url) => recompressDataUrl(url, 960, 0.7)));
+      totalImgBytes = finalImages.reduce((s, x) => s + x.length, 0);
+    }
+    if (totalImgBytes > 850_000) {
+      showToast('error', 'حجم الصور المرفقة يتجاوز الحد المسموح، يرجى حذف صورة.');
       return;
     }
 
     setIsSavingActivity(true);
     try {
+      const cleanFormal = actDetails.trim();
+      const cleanOriginal = actOriginalText.trim() || cleanFormal;
       if (editingActivityId) {
         await appDataService.updateSupervisorActivity(editingActivityId, {
           category: actCategory,
           subType: actSubType,
           title: actTitle.trim(),
-          details: actDetails.trim(),
-          images: actImages,
+          details: cleanFormal,
+          formalText: cleanFormal,
+          originalText: cleanOriginal,
+          inputType: actInputType,
+          audioUrl: actAudioUrl || undefined,
+          images: finalImages,
           targetGrade: actTargetGrade,
+          targetClass: actTargetClass,
           activityDate: actDate,
         });
-        setEditingActivityId(null);
-        setActTitle('');
-        setActDetails('');
-        setActImages([]);
+        resetActivityComposer();
         showToast('success', `✅ تم تعديل (${actCategory} - ${actSubType}) وإعادة إرساله إلى مدير المدرسة للاعتماد.`);
       } else {
         await appDataService.addSupervisorActivity({
@@ -363,17 +723,20 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
           category: actCategory,
           subType: actSubType,
           title: actTitle.trim(),
-          details: actDetails.trim(),
-          images: actImages,
+          details: cleanFormal,
+          formalText: cleanFormal,
+          originalText: cleanOriginal,
+          inputType: actInputType,
+          audioUrl: actAudioUrl || undefined,
+          images: finalImages,
           targetGrade: actTargetGrade,
+          targetClass: actTargetClass,
           activityDate: actDate,
           createdBy: session.name || 'المشرف',
           supervisorCode: session.code,
           approvalStatus: 'pending',
         });
-        setActTitle('');
-        setActDetails('');
-        setActImages([]);
+        resetActivityComposer();
         showToast('success', `✅ تم إرسال (${actCategory} - ${actSubType}) إلى بريد مدير المدرسة للاعتماد.`);
       }
     } catch (err: any) {
@@ -397,7 +760,10 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
     setAttParseError(null);
     setIsParsingAttendance(true);
     try {
-      const { dataUrl, base64, mimeType } = await compressImageForGemini(file, 1400, 0.8);
+      const { dataUrl, base64, mimeType } = await compressImageFile(file, {
+        maxDimension: 1280,
+        quality: 0.75,
+      });
       setAttImagePreview(dataUrl);
 
       const response = await fetch('/api/gemini/parse-attendance', {
@@ -495,7 +861,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
       setAttImagePreview(null);
       setAttParseError(null);
       setEditingAttendanceId(null);
-      showToast('success', '✅ تم إرسال كشف الحضور والغياب إلى بريد مدير المدرسة للاعتماد (وسيظهر في لوحة المدرسة فور الاعتماد).');
+      showToast('success', '✅ تم إرسال كشف الحضور والغياب إلى بريد مدير المدرسة للاعتماد (ويظهر في بوابة المشرف والمدير وحساب الطالب الخاص فقط).');
     } catch (err: any) {
       showToast('error', err?.message || 'فشل إرسال كشف الحضور.');
     } finally {
@@ -518,7 +884,10 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
     setSchedParseError(null);
     setIsParsingSchedule(true);
     try {
-      const { dataUrl, base64, mimeType } = await compressImageForGemini(file, 1400, 0.8);
+      const { dataUrl, base64, mimeType } = await compressImageFile(file, {
+        maxDimension: 1280,
+        quality: 0.75,
+      });
       setSchedImagePreview(dataUrl);
 
       const response = await fetch('/api/gemini/parse-schedule', {
@@ -652,6 +1021,116 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
             </div>
           </div>
         </div>
+
+        {/* Supervisor Workflow Notifications Bar ("تم اعتماد تقريرك ونشره" / "تم رفض تقريرك، السبب: ...") */}
+        {(() => {
+          const unreadNotifs = supervisorNotifications.filter((n) => !n.isRead);
+          if (supervisorNotifications.length === 0) return null;
+          const latest = unreadNotifs[0] || supervisorNotifications[0];
+          const isRejected = latest?.type === 'rejected';
+          const isApproved = latest?.type === 'approved';
+          return (
+            <div className="bg-white rounded-2xl border border-[#C6DCF2] shadow-xs overflow-hidden">
+              <div
+                className={`px-4 py-2.5 flex items-center justify-between gap-2 ${
+                  unreadNotifs.length > 0 && isRejected
+                    ? 'bg-rose-50'
+                    : unreadNotifs.length > 0 && isApproved
+                    ? 'bg-emerald-50'
+                    : 'bg-[#F4F8FC]'
+                }`}
+              >
+                <button
+                  type="button"
+                  onClick={() => setShowNotifPanel((prev) => !prev)}
+                  className="flex items-center gap-2 text-xs sm:text-sm font-black text-[#1A3A5F] cursor-pointer text-right"
+                >
+                  <div className="relative shrink-0">
+                    <Bell className="w-4 h-4 text-[#1F5AAA]" />
+                    {unreadNotifs.length > 0 && (
+                      <span className="absolute -top-1.5 -right-1.5 w-2.5 h-2.5 rounded-full bg-rose-600 border border-white animate-pulse" />
+                    )}
+                  </div>
+                  <span className="line-clamp-1">
+                    {unreadNotifs.length > 0
+                      ? unreadNotifs[0].message
+                      : `إشعارات المشرف (${supervisorNotifications.length})`}
+                  </span>
+                  {unreadNotifs.length > 0 && (
+                    <span className="px-2 py-0.5 rounded-full bg-[#1F5AAA] text-white text-[10px] font-black shrink-0">
+                      {unreadNotifs.length} جديد
+                    </span>
+                  )}
+                </button>
+
+                <div className="flex items-center gap-2 shrink-0">
+                  {unreadNotifs.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        appDataService.markAllNotificationsRead(schoolId, 'supervisor')
+                      }
+                      className="px-2.5 py-1 rounded-xl bg-white border border-[#C6DCF2] text-[#1F5AAA] text-[11px] font-black cursor-pointer"
+                    >
+                      تحديد كمقروء
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setShowNotifPanel((prev) => !prev)}
+                    className="text-[11px] font-bold text-[#1F5AAA] cursor-pointer"
+                  >
+                    {showNotifPanel ? 'إخفاء' : 'الكل'}
+                  </button>
+                </div>
+              </div>
+
+              {showNotifPanel && (
+                <div className="p-3 space-y-2 max-h-60 overflow-y-auto border-t border-[#DCE7F3]">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-black text-[#5C7085]">سجل إشعارات الاعتماد والرفض</span>
+                    {unreadNotifs.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          appDataService.markAllNotificationsRead(schoolId, 'supervisor')
+                        }
+                        className="text-[11px] font-black text-[#1F5AAA] flex items-center gap-1 cursor-pointer"
+                      >
+                        <CheckCheck className="w-3.5 h-3.5" />
+                        <span>قراءة الكل</span>
+                      </button>
+                    )}
+                  </div>
+                  {supervisorNotifications.slice(0, 15).map((n) => (
+                    <button
+                      key={n.id}
+                      type="button"
+                      onClick={() => {
+                        appDataService.markNotificationRead(n.id);
+                        setActiveTab(n.relatedKind === 'attendance' ? 'attendance' : 'activities');
+                      }}
+                      className={`w-full text-right p-2.5 rounded-xl border text-xs flex items-center justify-between gap-2 cursor-pointer transition ${
+                        n.isRead
+                          ? 'bg-slate-50 border-slate-200 text-slate-600'
+                          : n.type === 'rejected'
+                          ? 'bg-rose-50 border-rose-300 text-rose-950 font-bold'
+                          : n.type === 'approved'
+                          ? 'bg-emerald-50 border-emerald-300 text-emerald-950 font-bold'
+                          : 'bg-orange-50 border-orange-300 text-orange-950 font-bold'
+                      }`}
+                    >
+                      <span>{n.message}</span>
+                      <span className="text-[10px] text-[#5C7085] shrink-0">
+                        {n.createdAtFormatted}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {/* Inline Toast Banner */}
         {toast && (
@@ -822,7 +1301,8 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {/* Target Grade, Class/Section, Date */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <div>
                     <label className="block text-xs font-bold text-[#1A3A5F] mb-1">الصف المستهدف:</label>
                     <select
@@ -840,6 +1320,24 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                   </div>
 
                   <div>
+                    <label className="block text-xs font-bold text-[#1A3A5F] mb-1">الفصل / الشعبة:</label>
+                    <select
+                      value={actTargetClass}
+                      onChange={(e) => setActTargetClass(e.target.value)}
+                      className="w-full px-3 py-2.5 rounded-xl border border-[#DCE7F3] bg-[#F4F8FC] text-xs font-bold text-[#1A3A5F] focus:outline-[#1F5AAA]"
+                    >
+                      <option value="الكل">جميع الفصول</option>
+                      <option value="1">فصل 1</option>
+                      <option value="2">فصل 2</option>
+                      <option value="3">فصل 3</option>
+                      <option value="4">فصل 4</option>
+                      <option value="أ">فصل أ</option>
+                      <option value="ب">فصل ب</option>
+                      <option value="ج">فصل ج</option>
+                    </select>
+                  </div>
+
+                  <div>
                     <label className="block text-xs font-bold text-[#1A3A5F] mb-1">التاريخ:</label>
                     <input
                       type="date"
@@ -851,40 +1349,112 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                   </div>
                 </div>
 
-                <div>
-                  <label className="block text-xs font-bold text-[#1A3A5F] mb-1">
-                    عنوان ({actCategory} - {actSubType}):
-                  </label>
-                  <input
-                    type="text"
-                    value={actTitle}
-                    onChange={(e) => setActTitle(e.target.value)}
-                    placeholder={`مثال: ${
-                      actCategory === 'تقرير'
-                        ? 'تقرير زيارة فصلية لمتابعة الانضباط في الصف السابع'
-                        : actCategory === 'فعالية'
-                        ? 'حفل تكريم أوائل الطلاب للفصل الأول'
-                        : 'المسابقة العلمية والثقافية بين الفصول'
-                    }`}
-                    className="w-full px-3.5 py-2.5 rounded-xl border border-[#DCE7F3] bg-white text-xs sm:text-sm font-semibold text-[#1A3A5F] focus:outline-[#1F5AAA]"
-                    required
-                  />
-                </div>
+                {/* AI Creation Method Selector: Voice-First (Primary, max 2 min) vs Image + 1 Line */}
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <span className="text-xs font-black text-[#1A3A5F] flex items-center gap-1.5">
+                      <Sparkles className="w-4 h-4 text-[#1F5AAA]" />
+                      <span>اختر طريقة الصياغة الآلية الاحترافية (بالذكاء الاصطناعي):</span>
+                    </span>
+                    <span className="text-[11px] font-bold text-[#5C7085]">
+                      صور فقط (مضغوطة JPG) • ممنوع الفيديو نهائياً
+                    </span>
+                  </div>
 
-                <div>
-                  <label className="block text-xs font-bold text-[#1A3A5F] mb-1">الوصف والتفاصيل:</label>
-                  <textarea
-                    rows={3}
-                    value={actDetails}
-                    onChange={(e) => setActDetails(e.target.value)}
-                    placeholder="اكتب وصفاً واضحاً ومفصلاً للتقرير أو النشاط أو الفعالية ليراجعه مدير المدرسة..."
-                    className="w-full p-3 rounded-xl border border-[#DCE7F3] bg-white text-xs sm:text-sm text-[#1A3A5F] focus:outline-[#1F5AAA]"
-                    required
-                  />
-                </div>
+                  <div className="grid grid-cols-2 gap-2 p-1.5 bg-[#E6EEF7] rounded-2xl border border-[#C6DCF2]">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAiCreationMode('voice');
+                        setAiDraftError(null);
+                      }}
+                      className={`py-2.5 px-3 rounded-xl text-xs font-black transition cursor-pointer flex items-center justify-center gap-1.5 ${
+                        aiCreationMode === 'voice'
+                          ? 'bg-white text-[#1F5AAA] shadow-xs'
+                          : 'text-[#475569] hover:text-[#1A3A5F]'
+                      }`}
+                    >
+                      <Mic className="w-4 h-4 shrink-0" />
+                      <span>الطريقة الأساسية: بالصوت (دقيقتان)</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAiCreationMode('image');
+                        setAiDraftError(null);
+                      }}
+                      className={`py-2.5 px-3 rounded-xl text-xs font-black transition cursor-pointer flex items-center justify-center gap-1.5 ${
+                        aiCreationMode === 'image'
+                          ? 'bg-white text-[#1F5AAA] shadow-xs'
+                          : 'text-[#475569] hover:text-[#1A3A5F]'
+                      }`}
+                    >
+                      <Camera className="w-4 h-4 shrink-0" />
+                      <span>الطريقة الثانية: صورة + سطر واحد</span>
+                    </button>
+                  </div>
 
-                {/* Up to 3 Photos Uploader */}
-                <div className="p-4 rounded-2xl border-2 border-dashed border-[#9BBEDF] bg-[#F4F8FC] space-y-3">
+                  {/* VOICE INPUT PANEL (Primary) */}
+                  {aiCreationMode === 'voice' && (
+                    <div className="p-4 sm:p-5 rounded-2xl border-2 border-[#9BBEDF] bg-[#F4F8FC] text-center space-y-3">
+                      <div className="flex flex-col items-center gap-2">
+                        {!isRecording ? (
+                          <button
+                            type="button"
+                            disabled={isDraftingReport}
+                            onClick={handleStartVoiceRecording}
+                            className="px-6 py-3 rounded-2xl bg-[#1F5AAA] hover:bg-[#194B91] disabled:opacity-50 text-white text-xs sm:text-sm font-black shadow-md border border-[#194B91] flex items-center gap-2 cursor-pointer transition active:scale-95"
+                          >
+                            <Mic className="w-5 h-5" />
+                            <span>
+                              {isDraftingReport
+                                ? 'جاري تحويل الصوت وصياغة التقرير...'
+                                : hasAiDraftReady && actInputType === 'صوت'
+                                ? 'إعادة التسجيل الصوتي بالميكروفون'
+                                : 'اضغط للتحدث وتسجيل التقرير بالصوت'}
+                            </span>
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={handleStopVoiceRecording}
+                            className="px-6 py-3 rounded-2xl bg-rose-600 hover:bg-rose-700 text-white text-xs sm:text-sm font-black shadow-md border border-rose-700 flex items-center gap-2.5 cursor-pointer animate-pulse"
+                          >
+                            <Square className="w-4 h-4 fill-current" />
+                            <span>
+                              إيقاف التسجيل وصياغة التقرير ({formatMmSs(recordingSeconds)} / 02:00)
+                            </span>
+                          </button>
+                        )}
+                        <p className="text-[11px] font-semibold text-[#5C7085] max-w-md">
+                          تحدث بالعامية بطبيعتك (حتى دقيقتين كحد أقصى) — سيتم حفظ الصوت في Storage، تحويله لنص، ثم صياغته كتقرير رسمي مرتب ومختصر لمراجعتك.
+                        </p>
+                      </div>
+
+                      {isDraftingReport && (
+                        <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-white border border-[#C6DCF2] text-[#1F5AAA] text-xs font-black shadow-xs">
+                          <RefreshCw className="w-4 h-4 animate-spin" />
+                          <span>جاري رفع الصوت وتحويله لنص وصياغة التقرير الرسمي عبر Gemini...</span>
+                        </div>
+                      )}
+
+                      {(recordedAudioPreviewUrl || actAudioUrl) && (
+                        <div className="pt-1 max-w-md mx-auto">
+                          <div className="flex items-center justify-center gap-1.5 text-[11px] font-black text-[#1A3A5F] mb-1">
+                            <Volume2 className="w-3.5 h-3.5 text-[#1F5AAA]" />
+                            <span>التسجيل الصوتي للمشرف:</span>
+                          </div>
+                          <audio
+                            controls
+                            src={recordedAudioPreviewUrl || actAudioUrl}
+                            className="w-full h-9"
+                          />
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Hidden Photo Inputs (shared across Voice optional photos & Image+1-line) */}
                   <input
                     ref={actCameraRef}
                     type="file"
@@ -902,70 +1472,192 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                     className="hidden"
                   />
 
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div>
-                      <p className="text-xs font-black text-[#1A3A5F]">
-                        صور {actCategory} (اختياري — حتى 3 صور بحد أقصى)
-                      </p>
-                      <p className="text-[11px] font-semibold text-[#5C7085]">
-                        {actImages.length} / 3 صور مرفقة
-                      </p>
-                    </div>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <button
-                        type="button"
-                        disabled={actImages.length >= 3}
-                        onClick={() => actCameraRef.current?.click()}
-                        className="px-3 py-2 rounded-xl bg-[#1F5AAA] hover:bg-[#194B91] disabled:opacity-50 text-white text-xs font-black flex items-center gap-1.5 cursor-pointer"
-                      >
-                        <Camera className="w-3.5 h-3.5" />
-                        <span>التقاط صورة</span>
-                      </button>
-                      <button
-                        type="button"
-                        disabled={actImages.length >= 3}
-                        onClick={() => actGalleryRef.current?.click()}
-                        className="px-3 py-2 rounded-xl bg-white hover:bg-[#EEF5FC] disabled:opacity-50 text-[#1F5AAA] border border-[#C6DCF2] text-xs font-black flex items-center gap-1.5 cursor-pointer"
-                      >
-                        <ImageIcon className="w-3.5 h-3.5" />
-                        <span>اختيار من المعرض</span>
-                      </button>
-                    </div>
-                  </div>
-
-                  {actImages.length > 0 && (
-                    <div className="grid grid-cols-3 gap-2.5 pt-1">
-                      {actImages.map((imgUrl, idx) => (
-                        <div
-                          key={idx}
-                          className="relative rounded-xl overflow-hidden border border-[#DCE7F3] bg-white aspect-video"
+                  {/* Photos Uploader Box (Required in Image+1-line mode, optional in Voice mode) */}
+                  <div className="p-4 rounded-2xl border-2 border-dashed border-[#9BBEDF] bg-[#F4F8FC] space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <p className="text-xs font-black text-[#1A3A5F]">
+                          {aiCreationMode === 'image'
+                            ? `صور ${actCategory} (مطلوبة للطريقة الثانية — حتى 3 صور)`
+                            : `صور إضافية مرفقة لـ ${actCategory} (اختياري — حتى 3 صور)`}
+                        </p>
+                        <p className="text-[11px] font-semibold text-[#5C7085]">
+                          {actImages.length} / 3 صور مرفقة • ضغط تلقائي JPG حتى 1280px (بدون فيديو)
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          disabled={actImages.length >= 3}
+                          onClick={() => actCameraRef.current?.click()}
+                          className="px-3 py-2 rounded-xl bg-[#1F5AAA] hover:bg-[#194B91] disabled:opacity-50 text-white text-xs font-black flex items-center gap-1.5 cursor-pointer"
                         >
-                          <img
-                            src={imgUrl}
-                            alt={`صورة ${idx + 1}`}
-                            className="w-full h-full object-cover"
+                          <Camera className="w-3.5 h-3.5" />
+                          <span>التقاط صورة</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={actImages.length >= 3}
+                          onClick={() => actGalleryRef.current?.click()}
+                          className="px-3 py-2 rounded-xl bg-white hover:bg-[#EEF5FC] disabled:opacity-50 text-[#1F5AAA] border border-[#C6DCF2] text-xs font-black flex items-center gap-1.5 cursor-pointer"
+                        >
+                          <ImageIcon className="w-3.5 h-3.5" />
+                          <span>اختيار من المعرض</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {actImages.length > 0 && (
+                      <div className="grid grid-cols-3 gap-2.5 pt-1">
+                        {actImages.map((imgUrl, idx) => (
+                          <div
+                            key={idx}
+                            className="relative rounded-xl overflow-hidden border border-[#DCE7F3] bg-white aspect-video"
+                          >
+                            <img
+                              src={imgUrl}
+                              alt={`صورة ${idx + 1}`}
+                              className="w-full h-full object-cover"
+                            />
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setActImages((prev) => prev.filter((_, i) => i !== idx))
+                              }
+                              className="absolute top-1.5 left-1.5 w-6 h-6 rounded-full bg-rose-600 hover:bg-rose-700 text-white flex items-center justify-center text-xs font-black shadow-sm cursor-pointer"
+                              title="حذف الصورة"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* ONE-LINE NOTE + GENERATE BUTTON (Image + 1-Line mode) */}
+                    {aiCreationMode === 'image' && (
+                      <div className="pt-2 border-t border-[#C6DCF2] space-y-2.5">
+                        <div>
+                          <label className="block text-xs font-black text-[#1A3A5F] mb-1">
+                            اكتب سطراً واحداً فقط عن الصورة:
+                          </label>
+                          <input
+                            type="text"
+                            value={oneLineNote}
+                            onChange={(e) => setOneLineNote(e.target.value)}
+                            placeholder="مثال: تكريم طلاب الصف الثامن المتفوقين في الإذاعة الصباحية..."
+                            className="w-full px-3.5 py-2.5 rounded-xl border border-[#DCE7F3] bg-white text-xs sm:text-sm font-semibold text-[#1A3A5F] focus:outline-[#1F5AAA]"
                           />
+                        </div>
+                        <div className="flex justify-end">
                           <button
                             type="button"
-                            onClick={() =>
-                              setActImages((prev) => prev.filter((_, i) => i !== idx))
-                            }
-                            className="absolute top-1.5 left-1.5 w-6 h-6 rounded-full bg-rose-600 hover:bg-rose-700 text-white flex items-center justify-center text-xs font-black shadow-sm cursor-pointer"
-                            title="حذف الصورة"
+                            disabled={isDraftingReport || actImages.length === 0 || !oneLineNote.trim()}
+                            onClick={handleDraftFromImageAndOneLine}
+                            className="px-5 py-2.5 rounded-xl bg-[#1F5AAA] hover:bg-[#194B91] disabled:opacity-50 text-white text-xs font-black flex items-center gap-1.5 shadow-xs cursor-pointer"
                           >
-                            <X className="w-3.5 h-3.5" />
+                            <Sparkles className="w-4 h-4" />
+                            <span>
+                              {isDraftingReport
+                                ? 'جاري صياغة التقرير من الصورة...'
+                                : 'صياغة الوصف الكامل بالذكاء الاصطناعي'}
+                            </span>
                           </button>
                         </div>
-                      ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {aiDraftError && (
+                    <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-900 text-xs font-bold flex items-center gap-2">
+                      <AlertTriangle className="w-4 h-4 shrink-0" />
+                      <span>{aiDraftError}</span>
                     </div>
                   )}
                 </div>
 
+                {/* MANDATORY SUPERVISOR REVIEW BOX (Cannot send without reviewing draft) */}
+                {hasAiDraftReady ? (
+                  <div className="p-4 sm:p-5 rounded-2xl border-2 border-emerald-400 bg-emerald-50/40 space-y-3 animate-in fade-in">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <h4 className="text-xs sm:text-sm font-black text-[#1A3A5F] flex items-center gap-1.5">
+                        <ShieldCheck className="w-4 h-4 text-emerald-700" />
+                        <span>مراجعة المشرف للتقرير المقترح من Gemini (إلزامي قبل الإرسال)</span>
+                      </h4>
+                      <span className="px-2.5 py-0.5 rounded-full bg-white border border-[#C6DCF2] text-[#1F5AAA] text-[11px] font-black">
+                        نوع الإدخال: {actInputType}
+                      </span>
+                    </div>
+
+                    {actOriginalText && (
+                      <div className="p-3 rounded-xl bg-white border border-[#DCE7F3] space-y-1">
+                        <span className="text-[11px] font-black text-[#5C7085] block">
+                          النص الأصلي للمشرف ({actInputType === 'صوت' ? 'ما نطقه المشرف' : 'السطر المرفق مع الصورة'}):
+                        </span>
+                        <p className="text-xs font-semibold text-[#1A3A5F] leading-relaxed">
+                          {actOriginalText}
+                        </p>
+                      </div>
+                    )}
+
+                    <div>
+                      <label className="block text-xs font-bold text-[#1A3A5F] mb-1">
+                        عنوان ({actCategory} - {actSubType}) — قابل للتعديل:
+                      </label>
+                      <input
+                        type="text"
+                        value={actTitle}
+                        onChange={(e) => setActTitle(e.target.value)}
+                        className="w-full px-3.5 py-2.5 rounded-xl border border-[#DCE7F3] bg-white text-xs sm:text-sm font-black text-[#1A3A5F] focus:outline-[#1F5AAA]"
+                        required
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-bold text-[#1A3A5F] mb-1">
+                        الصياغة الرسمية المقترحة من Gemini — راجع وعدّل قبل الإرسال:
+                      </label>
+                      <textarea
+                        rows={4}
+                        value={actDetails}
+                        onChange={(e) => setActDetails(e.target.value)}
+                        className="w-full p-3 rounded-xl border border-[#DCE7F3] bg-white text-xs sm:text-sm font-medium text-[#1A3A5F] focus:outline-[#1F5AAA]"
+                        required
+                      />
+                    </div>
+
+                    <label className="flex items-start gap-2.5 p-3 rounded-xl bg-white border border-emerald-300 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={hasReviewedDraft}
+                        onChange={(e) => setHasReviewedDraft(e.target.checked)}
+                        className="mt-0.5 w-4 h-4 accent-[#1F5AAA] shrink-0 cursor-pointer"
+                      />
+                      <span className="text-xs font-black text-[#1A3A5F]">
+                        أؤكد أنني راجعت التقرير المقترح من Gemini وقمت بالتعديلات اللازمة قبل إرساله إلى مدير المدرسة للاعتماد.
+                      </span>
+                    </label>
+                  </div>
+                ) : (
+                  <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-950 text-xs font-bold flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0" />
+                    <span>
+                      لتوليد التقرير ومراجعته: سجل صوتك بالميكروفون (حتى دقيقتين) أو أرفق صورة واكتب سطراً واحداً، ثم اضغط صياغة ليظهر لك مربع المراجعة والتعديل قبل الإرسال.
+                    </span>
+                  </div>
+                )}
+
                 <div className="flex justify-end">
                   <button
                     type="submit"
-                    disabled={isSavingActivity}
-                    className="px-6 py-2.5 rounded-xl bg-[#1F5AAA] hover:bg-[#194B91] text-white text-xs sm:text-sm font-black shadow-sm border border-[#194B91] flex items-center gap-2 cursor-pointer disabled:opacity-50"
+                    disabled={
+                      isSavingActivity ||
+                      !hasAiDraftReady ||
+                      !hasReviewedDraft ||
+                      !actTitle.trim() ||
+                      !actDetails.trim()
+                    }
+                    className="px-6 py-2.5 rounded-xl bg-[#1F5AAA] hover:bg-[#194B91] text-white text-xs sm:text-sm font-black shadow-sm border border-[#194B91] flex items-center gap-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     <Send className="w-4 h-4" />
                     <span>
@@ -973,7 +1665,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                         ? 'جاري الإرسال...'
                         : editingActivityId
                         ? 'حفظ التعديل وإعادة الإرسال إلى المدير'
-                        : 'إرسال إلى المدير للاعتماد'}
+                        : 'إرسال للاعتماد'}
                     </span>
                   </button>
                 </div>
@@ -1017,6 +1709,11 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                                   {act.subType || act.category}
                                 </span>
                               )}
+                              {act.inputType && (
+                                <span className="px-2 py-0.5 rounded-full bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] text-[10px] font-black">
+                                  إدخال: {act.inputType}
+                                </span>
+                              )}
                             </div>
 
                             <span className="text-[11px] font-bold text-[#5C7085] tabular-nums">
@@ -1024,13 +1721,29 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                               {act.targetGrade === 'الكل' || !act.targetGrade
                                 ? 'جميع الصفوف'
                                 : getGradeLabelAr(act.targetGrade)}
+                              {act.targetClass && act.targetClass !== 'الكل'
+                                ? ` (فصل ${act.targetClass})`
+                                : ''}
                             </span>
                           </div>
 
                           <h4 className="font-black text-sm text-[#1A3A5F]">{act.title}</h4>
                           <p className="text-xs text-slate-700 leading-relaxed whitespace-pre-wrap font-medium">
-                            {act.details}
+                            {act.formalText || act.details}
                           </p>
+
+                          {act.audioUrl && (
+                            <div className="pt-1">
+                              <audio controls src={act.audioUrl} className="w-full h-8" />
+                            </div>
+                          )}
+
+                          {act.originalText && act.originalText !== (act.formalText || act.details) && (
+                            <div className="p-2 rounded-xl bg-white/80 border border-[#DCE7F3] text-[11px] text-[#5C7085]">
+                              <span className="font-black text-[#1A3A5F]">النص الأصلي: </span>
+                              <span>{act.originalText}</span>
+                            </div>
+                          )}
 
                           {imgs.length > 0 && (
                             <div
@@ -1116,7 +1829,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                     </span>
                   </h2>
                   <p className="text-xs text-[#5C7085] font-semibold mt-0.5">
-                    يقرأ Gemini الكشف ويعرضه ككروت بارزة (حاضر / غائب بعذر / غائب بدون عذر / متأخر) ثم يُرسل لمدير المدرسة للاعتماد والظهور في لوحة المدرسة
+                    يقرأ Gemini الكشف ويعرضه ككروت بارزة (حاضر / غائب بعذر / غائب بدون عذر / متأخر) ثم يُرسل لمدير المدرسة للاعتماد ويظهر في بوابة المشرف والمدير وحساب الطالب الخاص فقط
                   </p>
                 </div>
                 <span className="px-3 py-1 rounded-full bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] text-[11px] font-black">

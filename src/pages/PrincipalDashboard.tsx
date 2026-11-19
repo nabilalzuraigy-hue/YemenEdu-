@@ -7,6 +7,8 @@ import {
   GraduationCap,
   Inbox,
   School,
+  Bell,
+  CheckCheck,
 } from 'lucide-react';
 import { collection, query, where, onSnapshot } from 'firebase/firestore';
 import { db } from '../firebase/config';
@@ -14,6 +16,7 @@ import { UserSession } from '../services/authService';
 import {
   appDataService,
   Announcement,
+  AppNotification,
   AttendanceRecord,
   HomeworkSubmission,
   Question,
@@ -53,7 +56,11 @@ export const PrincipalDashboard: React.FC<PrincipalDashboardProps> = ({ session 
   const [submissions, setSubmissions] = useState<HomeworkSubmission[]>([]);
   const [unreadAnnouncementsCount, setUnreadAnnouncementsCount] = useState<number>(0);
   const [pendingInboxCount, setPendingInboxCount] = useState<number>(0);
+  const [principalNotifications, setPrincipalNotifications] = useState<AppNotification[]>([]);
+  const [showNotifPanel, setShowNotifPanel] = useState(false);
   const playedCircularIdsRef = useRef<Set<string>>(new Set());
+  const seenNotifIdsRef = useRef<Set<string>>(new Set());
+  const notifBootstrappedRef = useRef<boolean>(false);
 
   // PDF Modal for Archive
   const [pdfModalConfig, setPdfModalConfig] = useState<{
@@ -276,6 +283,44 @@ export const PrincipalDashboard: React.FC<PrincipalDashboardProps> = ({ session 
       );
     } catch {}
 
+    // 5. Live Principal Notifications ("تقرير جديد بانتظار اعتمادك")
+    const syncLocalNotifs = () => {
+      setPrincipalNotifications(appDataService.getNotifications(currentUser.schoolId, 'principal'));
+    };
+    syncLocalNotifs();
+    const unsubLocalNotifs = appDataService.subscribe(syncLocalNotifs);
+
+    let unsubNotifs = () => {};
+    try {
+      unsubNotifs = onSnapshot(
+        query(collection(db, 'notifications'), where('schoolId', '==', currentUser.schoolId)),
+        (snap) => {
+          const list = snap.docs
+            .map((d) => ({ ...d.data(), id: d.id } as AppNotification))
+            .filter(
+              (n) =>
+                (n.schoolId || '').trim().toLowerCase() === normalizedSchool &&
+                n.recipientRole === 'principal'
+            )
+            .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+
+          if (notifBootstrappedRef.current) {
+            const hasFreshUnread = list.some(
+              (n) => !n.isRead && !seenNotifIdsRef.current.has(n.id)
+            );
+            if (hasFreshUnread) {
+              playGentleNotificationSound();
+            }
+          } else {
+            notifBootstrappedRef.current = true;
+          }
+          list.forEach((n) => seenNotifIdsRef.current.add(n.id));
+          setPrincipalNotifications(list);
+        },
+        () => {}
+      );
+    } catch {}
+
     return () => {
       unsubCirc();
       unsubSubs();
@@ -283,6 +328,8 @@ export const PrincipalDashboard: React.FC<PrincipalDashboardProps> = ({ session 
       unsubLocalInbox();
       unsubInboxAct();
       unsubInboxAtt();
+      unsubLocalNotifs();
+      unsubNotifs();
     };
   }, [session.schoolId, session.name]);
 
@@ -367,6 +414,103 @@ export const PrincipalDashboard: React.FC<PrincipalDashboardProps> = ({ session 
         />
       ) : (
         <>
+          {/* Principal Notifications Bar ("تقرير جديد بانتظار اعتمادك") */}
+          {(() => {
+            const unreadNotifs = principalNotifications.filter((n) => !n.isRead);
+            if (principalNotifications.length === 0) return null;
+            return (
+              <div className="bg-white rounded-2xl border border-[#C6DCF2] shadow-xs overflow-hidden">
+                <div className="px-4 py-2.5 flex items-center justify-between gap-2 bg-[#F4F8FC]">
+                  <button
+                    type="button"
+                    onClick={() => setShowNotifPanel((prev) => !prev)}
+                    className="flex items-center gap-2 text-xs sm:text-sm font-black text-[#1A3A5F] cursor-pointer"
+                  >
+                    <div className="relative">
+                      <Bell className="w-4 h-4 text-[#1F5AAA]" />
+                      {unreadNotifs.length > 0 && (
+                        <span className="absolute -top-1.5 -right-1.5 w-2.5 h-2.5 rounded-full bg-rose-600 border border-white animate-pulse" />
+                      )}
+                    </div>
+                    <span>
+                      {unreadNotifs.length > 0
+                        ? unreadNotifs[0].message
+                        : `الإشعارات (${principalNotifications.length})`}
+                    </span>
+                    {unreadNotifs.length > 0 && (
+                      <span className="px-2 py-0.5 rounded-full bg-rose-600 text-white text-[10px] font-black">
+                        {unreadNotifs.length} جديد
+                      </span>
+                    )}
+                  </button>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    {unreadNotifs.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          appDataService.markAllNotificationsRead(session.schoolId, 'principal');
+                          setActiveTab('inbox');
+                        }}
+                        className="px-3 py-1 rounded-xl bg-[#1F5AAA] hover:bg-[#194B91] text-white text-[11px] font-black cursor-pointer"
+                      >
+                        مراجعة في البريد
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => setShowNotifPanel((prev) => !prev)}
+                      className="text-[11px] font-bold text-[#1F5AAA] cursor-pointer"
+                    >
+                      {showNotifPanel ? 'إخفاء' : 'الكل'}
+                    </button>
+                  </div>
+                </div>
+
+                {showNotifPanel && (
+                  <div className="p-3 space-y-2 max-h-60 overflow-y-auto border-t border-[#DCE7F3]">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-black text-[#5C7085]">سجل إشعارات المدير</span>
+                      {unreadNotifs.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            appDataService.markAllNotificationsRead(session.schoolId, 'principal')
+                          }
+                          className="text-[11px] font-black text-[#1F5AAA] flex items-center gap-1 cursor-pointer"
+                        >
+                          <CheckCheck className="w-3.5 h-3.5" />
+                          <span>تحديد الكل كمقروء</span>
+                        </button>
+                      )}
+                    </div>
+                    {principalNotifications.slice(0, 12).map((n) => (
+                      <button
+                        key={n.id}
+                        type="button"
+                        onClick={() => {
+                          appDataService.markNotificationRead(n.id);
+                          setActiveTab('inbox');
+                          setShowNotifPanel(false);
+                        }}
+                        className={`w-full text-right p-2.5 rounded-xl border text-xs flex items-center justify-between gap-2 cursor-pointer transition ${
+                          n.isRead
+                            ? 'bg-slate-50 border-slate-200 text-slate-600'
+                            : 'bg-amber-50 border-amber-300 text-[#1A3A5F] font-bold'
+                        }`}
+                      >
+                        <span>{n.message}</span>
+                        <span className="text-[10px] text-[#5C7085] shrink-0">
+                          {n.createdAtFormatted}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
           {/* Success Notification */}
           {successMsg && (
             <div className="p-3.5 rounded-2xl bg-emerald-50 border-2 border-emerald-400 text-emerald-950 text-xs sm:text-sm font-bold flex items-center justify-between shadow-sm animate-in fade-in">

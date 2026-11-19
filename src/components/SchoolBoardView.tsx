@@ -4,8 +4,6 @@ import {
   BookOpen,
   Calendar,
   CheckCircle2,
-  ChevronDown,
-  ChevronUp,
   Compass,
   FileText,
   Flag,
@@ -14,15 +12,12 @@ import {
   Megaphone,
   Sparkles,
   Trophy,
-  UserCheck,
   X,
 } from 'lucide-react';
 import { collection, query, where, onSnapshot } from 'firebase/firestore';
 import { db } from '../firebase/config';
 import {
   appDataService,
-  AttendanceRecord,
-  AttendanceStatus,
   getGradeLabelAr,
   SupervisorActivity,
   SupervisorActivityCategory,
@@ -34,7 +29,6 @@ interface SchoolBoardViewProps {
   heroTitle?: string;
   heroSubtitle?: string;
   topSlot?: React.ReactNode;
-  defaultGradeFilter?: string;
 }
 
 const normalizeCategoryBucket = (cat: SupervisorActivityCategory): 'تقرير' | 'نشاط' | 'فعالية' => {
@@ -51,61 +45,36 @@ const getBucketIcon = (bucket: 'تقرير' | 'نشاط' | 'فعالية', subTy
   return Trophy;
 };
 
-const getStatusCardStyle = (status: AttendanceStatus) => {
-  switch (status) {
-    case 'حاضر':
-      return {
-        card: 'bg-emerald-50/90 border-emerald-300',
-        badge: 'bg-emerald-600 text-white',
-        label: 'حاضر',
-      };
-    case 'غائب بعذر':
-      return {
-        card: 'bg-sky-50/90 border-sky-300',
-        badge: 'bg-[#1F5AAA] text-white',
-        label: 'غائب بعذر',
-      };
-    case 'متأخر':
-      return {
-        card: 'bg-amber-50/90 border-amber-300',
-        badge: 'bg-amber-500 text-white',
-        label: 'متأخر',
-      };
-    case 'غائب بدون عذر':
-    case 'غائب':
-    default:
-      return {
-        card: 'bg-rose-50/90 border-rose-300',
-        badge: 'bg-rose-600 text-white',
-        label: 'غائب بدون عذر',
-      };
-  }
+const formatTargetClassLabel = (targetGrade?: string, targetClass?: string): string => {
+  const gradePart =
+    !targetGrade || targetGrade === 'الكل' ? 'جميع الصفوف' : getGradeLabelAr(targetGrade);
+  const classPart =
+    targetClass && targetClass.trim() && targetClass.trim() !== 'الكل'
+      ? ` — فصل ${targetClass.trim()}`
+      : '';
+  return `${gradePart}${classPart}`;
 };
 
 export const SchoolBoardView: React.FC<SchoolBoardViewProps> = ({
   schoolId,
   schoolName,
   heroTitle = 'لوحة المدرسة',
-  heroSubtitle = 'التقارير والأنشطة والفعاليات وكشوفات الحضور والغياب المعتمدة من إدارة المدرسة',
+  heroSubtitle = 'التقارير والأنشطة والفعاليات المعتمدة من مدير المدرسة (للقراءة فقط)',
   topSlot,
 }) => {
   const [approvedActivities, setApprovedActivities] = useState<SupervisorActivity[]>(() =>
-    appDataService.getSupervisorActivities(schoolId).filter((a) => a.approvalStatus === 'approved')
-  );
-  const [approvedAttendance, setApprovedAttendance] = useState<AttendanceRecord[]>(() =>
-    appDataService.getAttendanceRecords(schoolId).filter((r) => r.approvalStatus === 'approved')
+    appDataService
+      .getSupervisorActivities(schoolId)
+      .filter((a) => a.approvalStatus === 'approved')
+      .sort((a, b) => (b.approvedAt || b.createdAt || 0) - (a.approvedAt || a.createdAt || 0))
   );
 
-  const [sectionFilter, setSectionFilter] = useState<
-    'الكل' | 'تقرير' | 'نشاط' | 'فعالية' | 'الحضور والغياب'
-  >('الكل');
-  const [expandedAttIds, setExpandedAttIds] = useState<Record<string, boolean>>({});
+  const [sectionFilter, setSectionFilter] = useState<'الكل' | 'تقرير' | 'نشاط' | 'فعالية'>('الكل');
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
 
   useEffect(() => {
     if (!schoolId) {
       setApprovedActivities([]);
-      setApprovedAttendance([]);
       return;
     }
 
@@ -116,19 +85,13 @@ export const SchoolBoardView: React.FC<SchoolBoardViewProps> = ({
         appDataService
           .getSupervisorActivities(schoolId)
           .filter((a) => a.approvalStatus === 'approved')
-      );
-      setApprovedAttendance(
-        appDataService
-          .getAttendanceRecords(schoolId)
-          .filter((r) => r.approvalStatus === 'approved')
+          .sort((a, b) => (b.approvedAt || b.createdAt || 0) - (a.approvedAt || a.createdAt || 0))
       );
     };
     syncLocal();
     const unsubApp = appDataService.subscribe(syncLocal);
 
     let unsubAct = () => {};
-    let unsubAtt = () => {};
-
     try {
       const qAct = query(collection(db, 'supervisor_activities'), where('schoolId', '==', schoolId));
       unsubAct = onSnapshot(
@@ -141,31 +104,12 @@ export const SchoolBoardView: React.FC<SchoolBoardViewProps> = ({
                 (a.schoolId || '').trim().toLowerCase() === normalizedSchool &&
                 a.approvalStatus === 'approved'
             )
-            .sort((a, b) => (b.approvedAt || b.createdAt || 0) - (a.approvedAt || a.createdAt || 0));
-          setApprovedActivities(list);
-        },
-        () => {}
-      );
-    } catch {}
-
-    try {
-      const qAtt = query(collection(db, 'attendance_records'), where('schoolId', '==', schoolId));
-      unsubAtt = onSnapshot(
-        qAtt,
-        (snap) => {
-          const list = snap.docs
-            .map((d) => ({ ...d.data(), id: d.id } as AttendanceRecord))
-            .filter(
-              (r) =>
-                (r.schoolId || '').trim().toLowerCase() === normalizedSchool &&
-                r.approvalStatus === 'approved'
-            )
             .sort(
               (a, b) =>
-                (b.date || '').localeCompare(a.date || '') ||
-                (b.approvedAt || b.createdAt || 0) - (a.approvedAt || a.createdAt || 0)
+                (b.approvedAt || b.createdAt || 0) - (a.approvedAt || a.createdAt || 0) ||
+                (b.activityDate || '').localeCompare(a.activityDate || '')
             );
-          setApprovedAttendance(list);
+          setApprovedActivities(list);
         },
         () => {}
       );
@@ -174,20 +118,15 @@ export const SchoolBoardView: React.FC<SchoolBoardViewProps> = ({
     return () => {
       unsubApp();
       unsubAct();
-      unsubAtt();
     };
   }, [schoolId]);
 
   const filteredActivities = approvedActivities.filter((act) => {
-    if (sectionFilter === 'الحضور والغياب') return false;
     if (sectionFilter === 'الكل') return true;
     return normalizeCategoryBucket(act.category) === sectionFilter;
   });
 
-  const showAttendance = sectionFilter === 'الكل' || sectionFilter === 'الحضور والغياب';
-  const showActivities = sectionFilter !== 'الحضور والغياب';
-
-  const totalBoardItems = approvedActivities.length + approvedAttendance.length;
+  const totalBoardItems = approvedActivities.length;
 
   return (
     <div dir="rtl" className="space-y-5 text-right font-['Cairo','Tajawal']">
@@ -217,10 +156,10 @@ export const SchoolBoardView: React.FC<SchoolBoardViewProps> = ({
         </div>
       </div>
 
-      {/* Optional top slot (e.g., Student Term 1 Schedule shortcut) */}
+      {/* Optional top slot (e.g., Student Term 1 Schedule & Private Attendance shortcuts) */}
       {topSlot}
 
-      {/* Filter Bar */}
+      {/* Filter Bar (Reports / Activities / Events only — NO Attendance on public School Board) */}
       <div className="bg-white rounded-2xl p-3 sm:p-4 border border-[#DCE7F3] shadow-xs flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-1.5">
           {(
@@ -238,17 +177,13 @@ export const SchoolBoardView: React.FC<SchoolBoardViewProps> = ({
                 id: 'فعالية',
                 label: `الفعاليات (${approvedActivities.filter((a) => normalizeCategoryBucket(a.category) === 'فعالية').length})`,
               },
-              {
-                id: 'الحضور والغياب',
-                label: `الحضور والغياب (${approvedAttendance.length})`,
-              },
             ] as const
           ).map((pill) => (
             <button
               key={pill.id}
               type="button"
               onClick={() => setSectionFilter(pill.id)}
-              className={`px-3 py-1.5 rounded-xl text-xs font-black transition cursor-pointer border ${
+              className={`px-3.5 py-1.5 rounded-xl text-xs font-black transition cursor-pointer border ${
                 sectionFilter === pill.id
                   ? 'bg-[#1F5AAA] text-white border-[#194B91] shadow-2xs'
                   : 'bg-[#F4F8FC] text-[#1A3A5F] border-[#DCE7F3] hover:bg-[#EEF5FC]'
@@ -258,141 +193,26 @@ export const SchoolBoardView: React.FC<SchoolBoardViewProps> = ({
             </button>
           ))}
         </div>
+        <span className="text-[11px] font-bold text-[#5C7085]">
+          مرتبة من الأحدث للأقدم
+        </span>
       </div>
 
       {/* Empty State */}
-      {((showActivities && filteredActivities.length === 0 && (!showAttendance || approvedAttendance.length === 0)) ||
-        (!showActivities && approvedAttendance.length === 0)) && (
+      {filteredActivities.length === 0 && (
         <div className="bg-white rounded-2xl p-8 border border-[#DCE7F3] text-center space-y-2 shadow-sm">
           <Sparkles className="w-10 h-10 text-[#9BBEDF] mx-auto" />
           <h3 className="font-black text-sm sm:text-base text-[#1A3A5F]">
             لا توجد منشورات معتمدة في لوحة المدرسة حالياً
           </h3>
           <p className="text-xs text-[#5C7085] font-semibold max-w-md mx-auto leading-relaxed">
-            تظهر هنا تلقائياً التقارير والأنشطة والفعاليات وكشوفات الحضور والغياب فور اعتمادها من مدير المدرسة.
+            تظهر هنا تلقائياً التقارير والأنشطة والفعاليات فور اعتمادها من مدير المدرسة، مرتبة من الأحدث إلى الأقدم.
           </p>
         </div>
       )}
 
-      {/* Approved Attendance Records (Prominent Cards per grade & class) */}
-      {showAttendance && approvedAttendance.length > 0 && (
-        <section className="space-y-3">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm sm:text-base font-black text-[#1A3A5F] flex items-center gap-2">
-              <UserCheck className="w-5 h-5 text-[#1F5AAA]" />
-              <span>كشوفات الحضور والغياب المعتمدة</span>
-            </h3>
-            <span className="px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 text-[11px] font-black">
-              {approvedAttendance.length} كشف معتمد
-            </span>
-          </div>
-
-          <div className="space-y-3">
-            {approvedAttendance.map((rec) => {
-              const excusedCount =
-                rec.absentExcusedCount ??
-                rec.entries.filter((e) => e.status === 'غائب بعذر').length;
-              const unexcusedCount =
-                rec.absentUnexcusedCount ??
-                rec.entries.filter((e) => e.status === 'غائب بدون عذر' || e.status === 'غائب').length;
-              const isExpanded = expandedAttIds[rec.id] ?? approvedAttendance.length <= 2;
-
-              return (
-                <div
-                  key={rec.id}
-                  className="bg-white rounded-2xl p-4 sm:p-5 border-2 border-emerald-300 shadow-sm space-y-3"
-                >
-                  <div className="flex flex-wrap items-center justify-between gap-2.5">
-                    <div className="space-y-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-900 border border-emerald-300 text-[11px] font-black">
-                          <CheckCircle2 className="w-3 h-3" />
-                          <span>معتمد</span>
-                        </span>
-                        <h4 className="font-black text-sm sm:text-base text-[#1A3A5F]">
-                          {rec.gradeLabel} — فصل {rec.classNumber}
-                        </h4>
-                        <span className="px-2.5 py-0.5 rounded-lg bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] text-[11px] font-mono font-bold">
-                          {rec.date}
-                        </span>
-                      </div>
-                      <p className="text-[11px] font-semibold text-[#5C7085]">
-                        رفع المشرف: {rec.recordedBy} • اعتمد بواسطة: {rec.approvedBy || 'مدير المدرسة'}
-                      </p>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setExpandedAttIds((prev) => ({ ...prev, [rec.id]: !isExpanded }))
-                      }
-                      className="px-3 py-1.5 rounded-xl bg-[#F4F8FC] hover:bg-[#EEF5FC] text-[#1F5AAA] border border-[#DCE7F3] text-xs font-black flex items-center gap-1.5 cursor-pointer"
-                    >
-                      <span>{isExpanded ? 'طي الكروت' : `عرض الكروت (${rec.entries.length})`}</span>
-                      {isExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                    </button>
-                  </div>
-
-                  {/* Summary Pills */}
-                  <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-black">
-                    <span className="px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 tabular-nums">
-                      حاضر: {rec.presentCount}
-                    </span>
-                    <span className="px-2.5 py-1 rounded-full bg-sky-50 text-[#1F5AAA] border border-[#C6DCF2] tabular-nums">
-                      غائب بعذر: {excusedCount}
-                    </span>
-                    <span className="px-2.5 py-1 rounded-full bg-rose-50 text-rose-800 border border-rose-200 tabular-nums">
-                      غائب بدون عذر: {unexcusedCount}
-                    </span>
-                    <span className="px-2.5 py-1 rounded-full bg-amber-50 text-amber-900 border border-amber-200 tabular-nums">
-                      متأخر: {rec.lateCount}
-                    </span>
-                  </div>
-
-                  {/* Prominent Student Cards (كروت بارزة) */}
-                  {isExpanded && (
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5 pt-2 border-t border-slate-100">
-                      {rec.entries.map((entry, idx) => {
-                        const style = getStatusCardStyle(entry.status);
-                        return (
-                          <div
-                            key={`${rec.id}_${idx}`}
-                            className={`rounded-2xl p-3 border shadow-2xs flex flex-col justify-between gap-1.5 ${style.card}`}
-                          >
-                            <div className="flex items-start justify-between gap-2">
-                              <div className="min-w-0">
-                                <span className="text-[10px] font-black text-[#5C7085] block">
-                                  طالب #{idx + 1}
-                                </span>
-                                <span className="font-black text-xs sm:text-sm text-[#1A3A5F] break-words">
-                                  {entry.studentName}
-                                </span>
-                              </div>
-                              <span
-                                className={`px-2.5 py-1 rounded-xl text-[10px] font-black shrink-0 shadow-2xs ${style.badge}`}
-                              >
-                                {style.label}
-                              </span>
-                            </div>
-                            {entry.note && (
-                              <p className="text-[11px] font-semibold text-[#1A3A5F]/80 bg-white/75 rounded-lg px-2 py-1 border border-white">
-                                ملاحظة: {entry.note}
-                              </p>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </section>
-      )}
-
-      {/* Approved Reports, Activities, and Events */}
-      {showActivities && filteredActivities.length > 0 && (
+      {/* Approved Reports, Activities, and Events (Read-Only, Newest First) */}
+      {filteredActivities.length > 0 && (
         <section className="space-y-3">
           <div className="flex items-center justify-between">
             <h3 className="text-sm sm:text-base font-black text-[#1A3A5F] flex items-center gap-2">
@@ -409,88 +229,104 @@ export const SchoolBoardView: React.FC<SchoolBoardViewProps> = ({
               const bucket = normalizeCategoryBucket(act.category);
               const Icon = getBucketIcon(bucket, act.subType);
               const images = Array.isArray(act.images) ? act.images : [];
+              const classLabel = formatTargetClassLabel(act.targetGrade, act.targetClass);
               return (
                 <article
                   key={act.id}
-                  className="bg-white rounded-2xl p-4 sm:p-5 border-2 border-emerald-300 shadow-sm flex flex-col justify-between gap-3"
+                  className="bg-white rounded-2xl overflow-hidden border border-[#DCE7F3] shadow-sm flex flex-col justify-between"
                 >
-                  <div className="space-y-2.5">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] text-[11px] font-black">
-                          <Icon className="w-3.5 h-3.5" />
-                          <span>{bucket}</span>
-                        </span>
-                        {(act.subType || (act.category !== bucket && act.category)) && (
-                          <span className="px-2.5 py-0.5 rounded-full bg-slate-100 text-[#1A3A5F] border border-slate-200 text-[11px] font-bold">
-                            {act.subType || act.category}
-                          </span>
-                        )}
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-900 text-[10px] font-black">
-                          <CheckCircle2 className="w-3 h-3" />
-                          <span>معتمد</span>
-                        </span>
-                      </div>
-
-                      <span className="text-[11px] font-bold text-[#5C7085] flex items-center gap-1 tabular-nums">
-                        <Calendar className="w-3 h-3 text-[#1F5AAA]" />
-                        <span>{act.activityDate}</span>
+                  {/* Primary Cover Photo or Clean Visual Header */}
+                  {images.length > 0 ? (
+                    <div className="relative">
+                      <button
+                        type="button"
+                        onClick={() => setLightboxImage(images[0])}
+                        className="block w-full aspect-video bg-[#F4F8FC] overflow-hidden cursor-pointer group"
+                        title="عرض الصورة بالحجم الكامل"
+                      >
+                        <img
+                          src={images[0]}
+                          alt={act.title}
+                          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                        />
+                      </button>
+                      {images.length > 1 && (
+                        <div className="grid grid-cols-2 gap-1.5 p-2 bg-[#F4F8FC] border-t border-[#DCE7F3]">
+                          {images.slice(1).map((imgUrl, idx) => (
+                            <button
+                              key={idx}
+                              type="button"
+                              onClick={() => setLightboxImage(imgUrl)}
+                              className="relative rounded-xl overflow-hidden border border-[#DCE7F3] bg-white aspect-video cursor-pointer group"
+                              title="عرض الصورة بالحجم الكامل"
+                            >
+                              <img
+                                src={imgUrl}
+                                alt={`${act.title} - صورة ${idx + 2}`}
+                                className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                              />
+                              <span className="absolute bottom-1 left-1 px-1.5 py-0.5 rounded bg-black/55 text-white text-[10px] font-bold flex items-center gap-0.5">
+                                <ImageIcon className="w-2.5 h-2.5" />
+                                <span>{idx + 2}</span>
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="px-4 py-3 bg-gradient-to-l from-[#EEF5FC] to-[#F4F8FC] border-b border-[#DCE7F3] flex items-center justify-between">
+                      <span className="inline-flex items-center gap-1.5 text-xs font-black text-[#1F5AAA]">
+                        <Icon className="w-4 h-4" />
+                        <span>{bucket} مدرسي معتمد</span>
+                      </span>
+                      <span className="text-[11px] font-bold text-[#5C7085] tabular-nums">
+                        {act.activityDate}
                       </span>
                     </div>
+                  )}
 
-                    <h4 className="font-black text-sm sm:text-base text-[#1A3A5F] leading-snug">
-                      {act.title}
-                    </h4>
-
-                    <p className="text-xs sm:text-sm text-slate-700 leading-relaxed whitespace-pre-wrap font-medium">
-                      {act.details}
-                    </p>
-
-                    {images.length > 0 && (
-                      <div
-                        className={`grid gap-2 pt-1 ${
-                          images.length === 1
-                            ? 'grid-cols-1'
-                            : images.length === 2
-                            ? 'grid-cols-2'
-                            : 'grid-cols-3'
-                        }`}
-                      >
-                        {images.map((imgUrl, idx) => (
-                          <button
-                            key={idx}
-                            type="button"
-                            onClick={() => setLightboxImage(imgUrl)}
-                            className="group relative rounded-xl overflow-hidden border border-[#DCE7F3] bg-[#F4F8FC] aspect-video cursor-pointer"
-                            title="عرض الصورة بالحجم الكامل"
-                          >
-                            <img
-                              src={imgUrl}
-                              alt={`${act.title} - صورة ${idx + 1}`}
-                              className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-                            />
-                            <span className="absolute bottom-1.5 left-1.5 px-1.5 py-0.5 rounded-md bg-black/55 text-white text-[10px] font-bold flex items-center gap-1">
-                              <ImageIcon className="w-2.5 h-2.5" />
-                              <span>{idx + 1}</span>
+                  <div className="p-4 sm:p-5 space-y-3 flex-1 flex flex-col justify-between">
+                    <div className="space-y-2.5">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] text-[11px] font-black">
+                            <Icon className="w-3.5 h-3.5" />
+                            <span>{bucket}</span>
+                          </span>
+                          {(act.subType || (act.category !== bucket && act.category)) && (
+                            <span className="px-2.5 py-0.5 rounded-full bg-slate-100 text-[#1A3A5F] border border-slate-200 text-[11px] font-bold">
+                              {act.subType || act.category}
                             </span>
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
+                          )}
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-900 text-[10px] font-black">
+                            <CheckCircle2 className="w-3 h-3" />
+                            <span>معتمد</span>
+                          </span>
+                        </div>
 
-                  <div className="pt-2.5 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2 text-[11px] text-[#5C7085] font-semibold">
-                    <span className="flex items-center gap-1">
-                      <GraduationCap className="w-3.5 h-3.5 text-[#1F5AAA]" />
-                      <span>
-                        {act.targetGrade === 'الكل' || !act.targetGrade
-                          ? 'جميع الصفوف'
-                          : getGradeLabelAr(act.targetGrade)}
+                        <span className="text-[11px] font-bold text-[#5C7085] flex items-center gap-1 tabular-nums">
+                          <Calendar className="w-3 h-3 text-[#1F5AAA]" />
+                          <span>{act.activityDate}</span>
+                        </span>
+                      </div>
+
+                      <h4 className="font-black text-sm sm:text-base text-[#1A3A5F] leading-snug">
+                        {act.title}
+                      </h4>
+
+                      <p className="text-xs sm:text-sm text-slate-700 leading-relaxed whitespace-pre-wrap font-medium">
+                        {act.formalText || act.details}
+                      </p>
+                    </div>
+
+                    <div className="pt-2.5 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2 text-[11px] text-[#5C7085] font-semibold">
+                      <span className="flex items-center gap-1 text-[#1A3A5F] font-bold">
+                        <GraduationCap className="w-3.5 h-3.5 text-[#1F5AAA]" />
+                        <span>الفصل: {classLabel}</span>
                       </span>
-                    </span>
-                    <span>
-                      المشرف: {act.createdBy} • اعتماد: {act.approvedBy || 'مدير المدرسة'}
-                    </span>
+                      <span>اعتماد: {act.approvedBy || 'مدير المدرسة'}</span>
+                    </div>
                   </div>
                 </article>
               );

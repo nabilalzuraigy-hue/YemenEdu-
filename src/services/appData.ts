@@ -638,6 +638,8 @@ export const SUPERVISOR_SUBTYPES_MAP: Record<'تقرير' | 'نشاط' | 'فعا
   فعالية: ['حفل تكريم', 'يوم وطني', 'فعالية عامة أو مناسبة'],
 };
 
+export type SupervisorReportInputType = 'صوت' | 'صورة';
+
 export interface SupervisorActivity {
   id: string;
   schoolId: string;
@@ -645,9 +647,14 @@ export interface SupervisorActivity {
   subType?: string;
   title: string;
   details: string;
-  images?: string[]; // Up to 3 compressed images
+  images?: string[]; // Up to 3 compressed JPG images (max 1280px)
   targetGrade?: string;
+  targetClass?: string;
   activityDate: string;
+  inputType?: SupervisorReportInputType;
+  originalText?: string; // Original spoken transcript or 1-line photo note
+  formalText?: string; // Final Gemini-drafted & supervisor-reviewed formal text
+  audioUrl?: string; // Firebase Storage download URL for voice recording
   createdBy: string;
   supervisorCode?: string;
   approvalStatus?: SupervisorApprovalStatus;
@@ -655,6 +662,21 @@ export interface SupervisorActivity {
   approvedBy?: string;
   approvedAt?: number;
   approvedAtFormatted?: string;
+  createdAt: number;
+  createdAtFormatted: string;
+}
+
+export interface AppNotification {
+  id: string;
+  schoolId: string;
+  recipientRole: 'principal' | 'supervisor';
+  recipientCode?: string;
+  type: 'new_report' | 'approved' | 'rejected' | 'revision_requested';
+  title: string;
+  message: string;
+  relatedId?: string;
+  relatedKind?: 'activity' | 'attendance';
+  isRead: boolean;
   createdAt: number;
   createdAtFormatted: string;
 }
@@ -784,6 +806,7 @@ class AppDataService {
   private attendanceRecords: AttendanceRecord[] = [];
   private classSchedules: ClassSchedule[] = [];
   private supervisorActivities: SupervisorActivity[] = [];
+  private notifications: AppNotification[] = [];
   private listeners: Array<() => void> = [];
 
   constructor() {
@@ -989,6 +1012,18 @@ class AppDataService {
           this.supervisorActivities = snap.empty
             ? []
             : snap.docs.map((d) => ({ ...d.data(), id: d.id } as SupervisorActivity));
+          this.notify();
+        },
+        () => {}
+      );
+
+      // 11. Workflow Notifications
+      onSnapshot(
+        collection(db, 'notifications'),
+        (snap) => {
+          this.notifications = snap.empty
+            ? []
+            : snap.docs.map((d) => ({ ...d.data(), id: d.id } as AppNotification));
           this.notify();
         },
         () => {}
@@ -2219,6 +2254,111 @@ class AppDataService {
     }
   }
 
+  // --- Firebase Storage Upload for Supervisor Voice Recording (Max 2 minutes) ---
+  public async uploadSupervisorAudio(schoolId: string, audioBlob: Blob): Promise<string> {
+    await ensureAuthReady();
+    const cleanSchool = (schoolId || 'school').trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+    const mime = (audioBlob.type || 'audio/webm').split(';')[0];
+    const ext = mime.includes('mp4') || mime.includes('m4a')
+      ? 'm4a'
+      : mime.includes('ogg')
+      ? 'ogg'
+      : mime.includes('wav')
+      ? 'wav'
+      : 'webm';
+    const path = `supervisor_audio/${cleanSchool}/${Date.now()}_${Math.random().toString(36).substring(2, 7)}.${ext}`;
+    try {
+      const fileRef = storageRef(storage, path);
+      const snap = await withTimeout(
+        uploadBytes(fileRef, audioBlob, { contentType: mime }),
+        12000,
+        'رفع التسجيل الصوتي إلى Storage'
+      );
+      return await withTimeout(getDownloadURL(snap.ref), 6000, 'جلب رابط الصوت');
+    } catch (err) {
+      console.warn('[Storage Audio Upload notice]:', err);
+      return '';
+    }
+  }
+
+  // --- Workflow Notifications (Supervisor <-> Principal) ---
+  public getNotifications(
+    schoolId?: string,
+    recipientRole?: 'principal' | 'supervisor',
+    recipientCode?: string
+  ): AppNotification[] {
+    if (!schoolId || !schoolId.trim()) return [];
+    const normalizedSchool = schoolId.trim().toLowerCase();
+    return this.notifications
+      .filter((n) => {
+        if ((n.schoolId || '').trim().toLowerCase() !== normalizedSchool) return false;
+        if (recipientRole && n.recipientRole !== recipientRole) return false;
+        if (
+          recipientCode &&
+          n.recipientCode &&
+          n.recipientCode.trim().toUpperCase() !== recipientCode.trim().toUpperCase()
+        ) {
+          return false;
+        }
+        return true;
+      })
+      .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  }
+
+  public async createNotification(
+    input: Omit<AppNotification, 'id' | 'isRead' | 'createdAt' | 'createdAtFormatted'>
+  ): Promise<AppNotification | null> {
+    await ensureAuthReady();
+    const now = Date.now();
+    const notif: AppNotification = cleanFirestorePayload({
+      ...input,
+      id: `notif_${now}_${Math.random().toString(36).substring(2, 7)}`,
+      isRead: false,
+      createdAt: now,
+      createdAtFormatted: formatArabicDateTime(new Date(now)),
+    });
+    try {
+      await setDoc(doc(db, 'notifications', notif.id), notif);
+      this.notifications = [notif, ...this.notifications.filter((n) => n.id !== notif.id)];
+      this.notify();
+      return notif;
+    } catch (error) {
+      console.warn('[Notification create notice]:', error);
+      return null;
+    }
+  }
+
+  public async markNotificationRead(id: string): Promise<void> {
+    const existing = this.notifications.find((n) => n.id === id);
+    if (!existing || existing.isRead) return;
+    const updated = { ...existing, isRead: true };
+    this.notifications = this.notifications.map((n) => (n.id === id ? updated : n));
+    this.notify();
+    try {
+      await setDoc(doc(db, 'notifications', id), cleanFirestorePayload(updated));
+    } catch {}
+  }
+
+  public async markAllNotificationsRead(
+    schoolId: string,
+    recipientRole: 'principal' | 'supervisor'
+  ): Promise<void> {
+    const unread = this.getNotifications(schoolId, recipientRole).filter((n) => !n.isRead);
+    if (unread.length === 0) return;
+    const unreadIds = new Set(unread.map((n) => n.id));
+    this.notifications = this.notifications.map((n) =>
+      unreadIds.has(n.id) ? { ...n, isRead: true } : n
+    );
+    this.notify();
+    try {
+      await Promise.all(
+        unread.map((n) =>
+          setDoc(doc(db, 'notifications', n.id), cleanFirestorePayload({ ...n, isRead: true }))
+        )
+      );
+    } catch {}
+  }
+
   // --- Supervisor Activities & Reports (Approval Flow: pending -> approved / revision_requested / rejected) ---
   public getSupervisorActivities(schoolId?: string): SupervisorActivity[] {
     if (!schoolId || !schoolId.trim()) return [];
@@ -2239,6 +2379,7 @@ class AppDataService {
 
     const newAct: SupervisorActivity = cleanFirestorePayload({
       ...activity,
+      formalText: activity.formalText || activity.details,
       images: cleanImages && cleanImages.length > 0 ? cleanImages : undefined,
       approvalStatus: activity.approvalStatus || 'pending',
       id: `sact_${now}_${Math.random().toString(36).substring(2, 7)}`,
@@ -2249,6 +2390,17 @@ class AppDataService {
       await setDoc(doc(db, 'supervisor_activities', newAct.id), newAct);
       this.supervisorActivities = [newAct, ...this.supervisorActivities.filter((a) => a.id !== newAct.id)];
       this.notify();
+
+      // Notify Principal: "تقرير جديد بانتظار اعتمادك"
+      await this.createNotification({
+        schoolId: newAct.schoolId,
+        recipientRole: 'principal',
+        type: 'new_report',
+        title: 'تقرير جديد بانتظار اعتمادك',
+        message: `تقرير جديد بانتظار اعتمادك: ${newAct.title}`,
+        relatedId: newAct.id,
+        relatedKind: 'activity',
+      });
     } catch (error) {
       handleFirestoreError(error, OperationType.CREATE, `supervisor_activities/${newAct.id}`);
     }
@@ -2260,7 +2412,18 @@ class AppDataService {
     updates: Partial<
       Pick<
         SupervisorActivity,
-        'category' | 'subType' | 'title' | 'details' | 'images' | 'targetGrade' | 'activityDate'
+        | 'category'
+        | 'subType'
+        | 'title'
+        | 'details'
+        | 'images'
+        | 'targetGrade'
+        | 'targetClass'
+        | 'activityDate'
+        | 'inputType'
+        | 'originalText'
+        | 'formalText'
+        | 'audioUrl'
       >
     >
   ): Promise<void> {
@@ -2280,6 +2443,7 @@ class AppDataService {
     const updated: SupervisorActivity = cleanFirestorePayload({
       ...existing,
       ...updates,
+      formalText: updates.formalText || updates.details || existing.formalText || existing.details,
       images: cleanImages && cleanImages.length > 0 ? cleanImages : undefined,
       approvalStatus: 'pending',
       principalNote: undefined,
@@ -2291,6 +2455,16 @@ class AppDataService {
       await setDoc(doc(db, 'supervisor_activities', id), updated);
       this.supervisorActivities = [updated, ...this.supervisorActivities.filter((a) => a.id !== id)];
       this.notify();
+
+      await this.createNotification({
+        schoolId: updated.schoolId,
+        recipientRole: 'principal',
+        type: 'new_report',
+        title: 'تقرير جديد بانتظار اعتمادك',
+        message: `تقرير جديد بانتظار اعتمادك (بعد التعديل): ${updated.title}`,
+        relatedId: updated.id,
+        relatedKind: 'activity',
+      });
     } catch (error) {
       handleFirestoreError(error, OperationType.UPDATE, `supervisor_activities/${id}`);
     }
@@ -2311,10 +2485,11 @@ class AppDataService {
     if (!existing) throw new Error('لم يتم العثور على السجل المطلوب مراجعته.');
 
     const now = Date.now();
+    const cleanNote = note?.trim() || '';
     const updated: SupervisorActivity = cleanFirestorePayload({
       ...existing,
       approvalStatus: status,
-      principalNote: note?.trim() || undefined,
+      principalNote: cleanNote || undefined,
       approvedBy: principalName || 'مدير المدرسة',
       approvedAt: now,
       approvedAtFormatted: formatArabicDateTime(new Date(now)),
@@ -2324,6 +2499,41 @@ class AppDataService {
       await setDoc(doc(db, 'supervisor_activities', id), updated);
       this.supervisorActivities = [updated, ...this.supervisorActivities.filter((a) => a.id !== id)];
       this.notify();
+
+      if (status === 'approved') {
+        await this.createNotification({
+          schoolId: updated.schoolId,
+          recipientRole: 'supervisor',
+          recipientCode: updated.supervisorCode,
+          type: 'approved',
+          title: 'تم اعتماد تقريرك ونشره',
+          message: `تم اعتماد تقريرك ونشره: ${updated.title}`,
+          relatedId: updated.id,
+          relatedKind: 'activity',
+        });
+      } else if (status === 'rejected') {
+        await this.createNotification({
+          schoolId: updated.schoolId,
+          recipientRole: 'supervisor',
+          recipientCode: updated.supervisorCode,
+          type: 'rejected',
+          title: 'تم رفض تقريرك',
+          message: `تم رفض تقريرك (${updated.title})، السبب: ${cleanNote || 'لم يذكر سبب محدد'}`,
+          relatedId: updated.id,
+          relatedKind: 'activity',
+        });
+      } else {
+        await this.createNotification({
+          schoolId: updated.schoolId,
+          recipientRole: 'supervisor',
+          recipientCode: updated.supervisorCode,
+          type: 'revision_requested',
+          title: 'طلب تعديل على تقريرك',
+          message: `طلب المدير تعديلاً على تقريرك (${updated.title}): ${cleanNote || 'يرجى المراجعة والتعديل'}`,
+          relatedId: updated.id,
+          relatedKind: 'activity',
+        });
+      }
     } catch (error) {
       handleFirestoreError(error, OperationType.UPDATE, `supervisor_activities/${id}`);
     }
@@ -2455,6 +2665,16 @@ class AppDataService {
       await setDoc(doc(db, 'attendance_records', docId), record);
       this.attendanceRecords = [record, ...this.attendanceRecords.filter((r) => r.id !== docId)];
       this.notify();
+
+      await this.createNotification({
+        schoolId: record.schoolId,
+        recipientRole: 'principal',
+        type: 'new_report',
+        title: 'تقرير جديد بانتظار اعتمادك',
+        message: `تقرير جديد بانتظار اعتمادك: كشف حضور وغياب ${record.gradeLabel} (فصل ${record.classNumber}) - ${record.date}`,
+        relatedId: record.id,
+        relatedKind: 'attendance',
+      });
     } catch (error) {
       handleFirestoreError(error, OperationType.CREATE, `attendance_records/${docId}`);
     }
@@ -2476,10 +2696,11 @@ class AppDataService {
     if (!existing) throw new Error('لم يتم العثور على كشف الحضور المطلوب.');
 
     const now = Date.now();
+    const cleanNote = note?.trim() || '';
     const updated: AttendanceRecord = cleanFirestorePayload({
       ...existing,
       approvalStatus: status,
-      principalNote: note?.trim() || undefined,
+      principalNote: cleanNote || undefined,
       approvedBy: principalName || 'مدير المدرسة',
       approvedAt: now,
       approvedAtFormatted: formatArabicDateTime(new Date(now)),
@@ -2489,6 +2710,42 @@ class AppDataService {
       await setDoc(doc(db, 'attendance_records', id), updated);
       this.attendanceRecords = [updated, ...this.attendanceRecords.filter((r) => r.id !== id)];
       this.notify();
+
+      const label = `كشف حضور ${updated.gradeLabel} (فصل ${updated.classNumber})`;
+      if (status === 'approved') {
+        await this.createNotification({
+          schoolId: updated.schoolId,
+          recipientRole: 'supervisor',
+          recipientCode: updated.supervisorCode,
+          type: 'approved',
+          title: 'تم اعتماد تقريرك ونشره',
+          message: `تم اعتماد تقريرك ونشره (${label})`,
+          relatedId: updated.id,
+          relatedKind: 'attendance',
+        });
+      } else if (status === 'rejected') {
+        await this.createNotification({
+          schoolId: updated.schoolId,
+          recipientRole: 'supervisor',
+          recipientCode: updated.supervisorCode,
+          type: 'rejected',
+          title: 'تم رفض تقريرك',
+          message: `تم رفض تقريرك (${label})، السبب: ${cleanNote || 'لم يذكر سبب محدد'}`,
+          relatedId: updated.id,
+          relatedKind: 'attendance',
+        });
+      } else {
+        await this.createNotification({
+          schoolId: updated.schoolId,
+          recipientRole: 'supervisor',
+          recipientCode: updated.supervisorCode,
+          type: 'revision_requested',
+          title: 'طلب تعديل على كشف الحضور',
+          message: `طلب المدير تعديلاً على ${label}: ${cleanNote || 'يرجى المراجعة والتعديل'}`,
+          relatedId: updated.id,
+          relatedKind: 'attendance',
+        });
+      }
     } catch (error) {
       handleFirestoreError(error, OperationType.UPDATE, `attendance_records/${id}`);
     }
@@ -2771,6 +3028,7 @@ export async function handleFullWipe(autoReload: boolean = true): Promise<void> 
   await wipeCollectionHelper('attendance_records');
   await wipeCollectionHelper('class_schedules');
   await wipeCollectionHelper('supervisor_activities');
+  await wipeCollectionHelper('notifications');
 
   // Clear local storage and caches (preserve active session & activation code)
   const savedSession = sessionStorage.getItem('yemen_edu_active_session');
