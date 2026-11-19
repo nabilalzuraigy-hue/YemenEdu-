@@ -13,6 +13,10 @@ import {
   Layers,
   ChevronLeft,
   Lock,
+  Trophy,
+  Flag,
+  GraduationCap,
+  Image as ImageIcon,
 } from 'lucide-react';
 import { UserSession, getSubjectsForGrade } from '../services/authService';
 import {
@@ -21,10 +25,13 @@ import {
   GradeRecord,
   MonthlyGradebookRecord,
   MonthlyHomeworkArchiveBatch,
+  SchoolActivityArchiveBatch,
+  SupervisorActivity,
   Announcement,
   TeacherRecommendation,
   ACADEMIC_MONTHS,
   getCurrentAcademicMonth,
+  getGradeLabelAr,
   isObjectiveQuestion,
 } from '../services/appData';
 import { StudentArchiveSection } from './UnifiedSidebar';
@@ -37,6 +44,8 @@ interface StudentArchiveModalProps {
   session: UserSession;
   questions: Question[];
   archivedHomeworkBatches?: MonthlyHomeworkArchiveBatch[];
+  archivedSchoolActivityBatches?: SchoolActivityArchiveBatch[];
+  approvedSchoolActivities?: SupervisorActivity[];
   submissions: HomeworkSubmission[];
   studentGrades: GradeRecord[];
   archivedGradebooks: MonthlyGradebookRecord[];
@@ -51,6 +60,8 @@ export const StudentArchiveModal: React.FC<StudentArchiveModalProps> = ({
   session,
   questions,
   archivedHomeworkBatches = [],
+  archivedSchoolActivityBatches = [],
+  approvedSchoolActivities = [],
   submissions,
   studentGrades,
   archivedGradebooks,
@@ -59,10 +70,16 @@ export const StudentArchiveModal: React.FC<StudentArchiveModalProps> = ({
 }) => {
   const [selectedMonth, setSelectedMonth] = useState<string>(getCurrentAcademicMonth());
   const [selectedHwSubject, setSelectedHwSubject] = useState<string>('الكل');
+  const [selectedSchoolActivityCat, setSelectedSchoolActivityCat] = useState<'الكل' | 'تقرير' | 'نشاط' | 'فعالية'>('الكل');
+  const [lightboxImage, setLightboxImage] = useState<string | null>(null);
 
   if (!isOpen || !section) return null;
 
   const gradeSubjects = getSubjectsForGrade(session.grade || session.class || '8').map((s) => s.nameAr);
+  const activeMonthFilter =
+    section !== 'school_activities_archive' && selectedMonth === 'الكل'
+      ? getCurrentAcademicMonth()
+      : selectedMonth;
 
   const sectionMeta = {
     weekly_homework: {
@@ -94,6 +111,12 @@ export const StudentArchiveModal: React.FC<StudentArchiveModalProps> = ({
       subtitle: 'توصيات وتعليمات المعلمين التربوية للمواد المؤرشفة',
       icon: Sparkles,
       color: 'from-emerald-600 via-[#1E5AA8] to-amber-500',
+    },
+    school_activities_archive: {
+      title: 'أرشفة الأنشطة المدرسية',
+      subtitle: 'التقارير والأنشطة والفعاليات المعتمدة المؤرشفة تلقائياً كل أسبوع',
+      icon: Trophy,
+      color: 'from-[#1F5AAA] via-[#17488F] to-emerald-700',
     },
   }[section];
 
@@ -136,12 +159,25 @@ export const StudentArchiveModal: React.FC<StudentArchiveModalProps> = ({
           </div>
 
           <div className="flex items-center gap-1.5 overflow-x-auto py-0.5">
+            {section === 'school_activities_archive' && (
+              <button
+                type="button"
+                onClick={() => setSelectedMonth('الكل')}
+                className={`px-3 py-1 rounded-xl text-xs font-bold transition shrink-0 cursor-pointer ${
+                  activeMonthFilter === 'الكل'
+                    ? 'bg-[#1E5AA8] text-white shadow-xs'
+                    : 'bg-white text-gray-600 hover:bg-gray-100 border border-gray-200'
+                }`}
+              >
+                جميع الأشهر
+              </button>
+            )}
             {ACADEMIC_MONTHS.map((m) => (
               <button
                 key={m}
                 onClick={() => setSelectedMonth(m)}
                 className={`px-3 py-1 rounded-xl text-xs font-bold transition shrink-0 cursor-pointer ${
-                  selectedMonth === m
+                  activeMonthFilter === m
                     ? 'bg-[#1E5AA8] text-white shadow-xs'
                     : 'bg-white text-gray-600 hover:bg-gray-100 border border-gray-200'
                 }`}
@@ -204,7 +240,7 @@ export const StudentArchiveModal: React.FC<StudentArchiveModalProps> = ({
           {/* SECTION 2: ارشيف الواجب الشهري (الأرشفة التلقائية كل خميس) */}
           {section === 'monthly_homework' && (() => {
             const monthBatches = archivedHomeworkBatches.filter(
-              (b) => !b.monthName || b.monthName === selectedMonth
+              (b) => !b.monthName || b.monthName === activeMonthFilter
             );
             const allMonthQuestions = monthBatches.flatMap((b) => b.questions || []);
             const hwSubjectsList = Array.from(
@@ -569,6 +605,177 @@ export const StudentArchiveModal: React.FC<StudentArchiveModalProps> = ({
             </div>
           )}
 
+          {/* SECTION 6: أرشفة الأنشطة المدرسية (تؤرشف آلياً كل أسبوع) */}
+          {section === 'school_activities_archive' && (() => {
+            const normalizeCat = (cat: string): 'تقرير' | 'نشاط' | 'فعالية' => {
+              if (cat === 'تقرير') return 'تقرير';
+              if (cat === 'فعالية') return 'فعالية';
+              return 'نشاط';
+            };
+            const monthBatches = archivedSchoolActivityBatches.filter(
+              (b) => activeMonthFilter === 'الكل' || !b.monthName || b.monthName === activeMonthFilter
+            );
+            const totalItems = monthBatches.reduce((sum, b) => sum + (b.activities?.length || 0), 0);
+
+            return (
+              <div className="space-y-4">
+                <div className="p-3 bg-[#EEF5FC] rounded-2xl border border-[#C6DCF2] flex flex-wrap items-center justify-between gap-2 text-xs text-[#1A3A5F]">
+                  <div>
+                    <span className="font-black block">
+                      أرشيف الأنشطة والتقارير والفعاليات المدرسية ({activeMonthFilter === 'الكل' ? 'جميع الأشهر' : `شهر ${activeMonthFilter}`})
+                    </span>
+                    <span className="text-[11px] text-[#5C7085] font-semibold">
+                      تنتقل المنشورات المعتمدة تلقائياً من لوحة المدرسة كل أسبوع (الخميس) إلى هذا الأرشيف
+                    </span>
+                  </div>
+                  <span className="font-black text-[#1F5AAA] bg-white px-2.5 py-1 rounded-xl border border-[#C6DCF2]">
+                    {totalItems} منشور مؤرشف
+                  </span>
+                </div>
+
+                {/* Category filter pills */}
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {(['الكل', 'تقرير', 'نشاط', 'فعالية'] as const).map((cat) => (
+                    <button
+                      key={`stu-arc-sa-cat-${cat}`}
+                      type="button"
+                      onClick={() => setSelectedSchoolActivityCat(cat)}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-black transition cursor-pointer border ${
+                        selectedSchoolActivityCat === cat
+                          ? 'bg-[#1F5AAA] text-white border-[#194B91] shadow-2xs'
+                          : 'bg-gray-100 text-[#1A3A5F] hover:bg-gray-200 border-gray-200'
+                      }`}
+                    >
+                      {cat === 'الكل' ? 'الكل' : cat === 'تقرير' ? 'التقارير' : cat === 'نشاط' ? 'الأنشطة' : 'الفعاليات'}
+                    </button>
+                  ))}
+                </div>
+
+                {monthBatches.length === 0 || totalItems === 0 ? (
+                  <div className="p-8 text-center text-gray-500 bg-gray-50 rounded-2xl border border-gray-200 text-xs space-y-1.5">
+                    <Trophy className="w-9 h-9 text-[#9BBEDF] mx-auto" />
+                    <p className="font-bold text-[#1A3A5F]">
+                      لا توجد أنشطة مدرسية مؤرشفة {activeMonthFilter === 'الكل' ? 'حتى الآن' : `لشهر (${activeMonthFilter}) حتى الآن`}.
+                    </p>
+                    <p className="text-[11px] text-gray-500">
+                      تُؤرشف التقارير والأنشطة والفعاليات المعتمدة آلياً كل أسبوع وتظهر هنا للقراءة فقط.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {monthBatches.map((batch, bIdx) => {
+                      const batchItems = (batch.activities || []).filter(
+                        (act) =>
+                          selectedSchoolActivityCat === 'الكل' ||
+                          normalizeCat(act.category) === selectedSchoolActivityCat
+                      );
+                      if (batchItems.length === 0) return null;
+
+                      return (
+                        <div
+                          key={batch.id ? `sa-batch-${batch.id}-${bIdx}` : `sa-batch-idx-${bIdx}`}
+                          className="rounded-2xl border border-[#C6DCF2] bg-[#F4F8FC]/60 overflow-hidden"
+                        >
+                          <div className="px-4 py-2.5 bg-[#EEF5FC] border-b border-[#C6DCF2] flex flex-wrap items-center justify-between gap-2 text-xs">
+                            <div className="flex items-center gap-2 font-black text-[#1A3A5F]">
+                              <Calendar className="w-4 h-4 text-[#1F5AAA]" />
+                              <span>{batch.weekLabel}</span>
+                            </div>
+                            <span className="text-[11px] font-bold text-[#1F5AAA] bg-white px-2.5 py-0.5 rounded-lg border border-[#C6DCF2]">
+                              أرشفة تلقائية أسبوعية • {batchItems.length} منشور
+                            </span>
+                          </div>
+
+                          <div className="p-3 sm:p-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            {batchItems.map((act, idx) => {
+                              const bucket = normalizeCat(act.category);
+                              const liveMatch = approvedSchoolActivities.find((x) => x.id === act.id);
+                              const coverSrc =
+                                act.coverImage ||
+                                (liveMatch && Array.isArray(liveMatch.images) ? liveMatch.images[0] : undefined);
+                              const classLabel =
+                                !act.targetGrade || act.targetGrade === 'الكل'
+                                  ? 'جميع الصفوف'
+                                  : `${getGradeLabelAr(act.targetGrade)}${
+                                      act.targetClass && act.targetClass !== 'الكل'
+                                        ? ` — فصل ${act.targetClass}`
+                                        : ''
+                                    }`;
+
+                              return (
+                                <article
+                                  key={act.id ? `sa-item-${act.id}-${idx}` : `sa-item-idx-${idx}`}
+                                  className="rounded-2xl bg-white border border-[#DCE7F3] shadow-2xs overflow-hidden flex flex-col justify-between"
+                                >
+                                  {coverSrc && (
+                                    <button
+                                      type="button"
+                                      onClick={() => setLightboxImage(coverSrc)}
+                                      className="block w-full aspect-video bg-[#F4F8FC] overflow-hidden cursor-pointer group relative"
+                                      title="عرض الصورة"
+                                    >
+                                      <img
+                                        src={coverSrc}
+                                        alt={act.title}
+                                        className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                                      />
+                                      {act.imagesCount && act.imagesCount > 1 && (
+                                        <span className="absolute bottom-1.5 left-1.5 px-2 py-0.5 rounded bg-black/60 text-white text-[10px] font-bold flex items-center gap-1">
+                                          <ImageIcon className="w-3 h-3" />
+                                          <span>{act.imagesCount} صور</span>
+                                        </span>
+                                      )}
+                                    </button>
+                                  )}
+
+                                  <div className="p-3.5 space-y-2 flex-1 flex flex-col justify-between">
+                                    <div className="space-y-1.5">
+                                      <div className="flex flex-wrap items-center justify-between gap-1.5">
+                                        <div className="flex flex-wrap items-center gap-1">
+                                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] text-[10px] font-black">
+                                            {bucket === 'فعالية' ? <Flag className="w-3 h-3" /> : bucket === 'تقرير' ? <FileText className="w-3 h-3" /> : <Trophy className="w-3 h-3" />}
+                                            <span>{bucket}</span>
+                                          </span>
+                                          {act.subType && (
+                                            <span className="px-2 py-0.5 rounded-full bg-slate-100 text-[#1A3A5F] border border-slate-200 text-[10px] font-bold">
+                                              {act.subType}
+                                            </span>
+                                          )}
+                                        </div>
+                                        <span className="text-[10px] text-[#5C7085] font-bold tabular-nums">
+                                          {act.activityDate || act.dateLabel}
+                                        </span>
+                                      </div>
+
+                                      <h5 className="font-black text-xs sm:text-sm text-[#1A3A5F] leading-snug">
+                                        {act.title}
+                                      </h5>
+                                      <p className="text-xs text-slate-700 leading-relaxed whitespace-pre-wrap">
+                                        {act.formalText}
+                                      </p>
+                                    </div>
+
+                                    <div className="pt-2 border-t border-slate-100 flex flex-wrap items-center justify-between gap-1.5 text-[10px] text-[#5C7085] font-semibold">
+                                      <span className="inline-flex items-center gap-1 text-[#1A3A5F] font-bold">
+                                        <GraduationCap className="w-3 h-3 text-[#1F5AAA]" />
+                                        <span>{classLabel}</span>
+                                      </span>
+                                      <span>اعتماد: {act.approvedBy || 'مدير المدرسة'}</span>
+                                    </div>
+                                  </div>
+                                </article>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
         </div>
 
         {/* Modal Footer */}
@@ -582,6 +789,33 @@ export const StudentArchiveModal: React.FC<StudentArchiveModalProps> = ({
         </div>
 
       </div>
+
+      {/* Lightbox inside archive modal */}
+      {lightboxImage && (
+        <div
+          onClick={() => setLightboxImage(null)}
+          className="fixed inset-0 z-[60] bg-black/80 flex items-center justify-center p-4"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="relative max-w-2xl w-full bg-white rounded-2xl p-2 shadow-2xl"
+          >
+            <button
+              type="button"
+              onClick={() => setLightboxImage(null)}
+              className="absolute top-3 left-3 z-10 w-8 h-8 rounded-full bg-black/75 text-white flex items-center justify-center cursor-pointer"
+              aria-label="إغلاق الصورة"
+            >
+              <X className="w-4 h-4" />
+            </button>
+            <img
+              src={lightboxImage}
+              alt="معاينة صورة النشاط"
+              className="w-full max-h-[80dvh] object-contain rounded-xl bg-slate-900"
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 };

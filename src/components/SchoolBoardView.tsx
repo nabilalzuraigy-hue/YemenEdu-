@@ -1,9 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   Activity,
+  Archive,
   BookOpen,
   Calendar,
   CheckCircle2,
+  ChevronLeft,
   Compass,
   FileText,
   Flag,
@@ -19,6 +21,7 @@ import { db } from '../firebase/config';
 import {
   appDataService,
   getGradeLabelAr,
+  isSchoolActivityArchivedForWeek,
   SupervisorActivity,
   SupervisorActivityCategory,
 } from '../services/appData';
@@ -29,6 +32,7 @@ interface SchoolBoardViewProps {
   heroTitle?: string;
   heroSubtitle?: string;
   topSlot?: React.ReactNode;
+  onOpenSchoolActivitiesArchive?: () => void;
 }
 
 const normalizeCategoryBucket = (cat: SupervisorActivityCategory): 'تقرير' | 'نشاط' | 'فعالية' => {
@@ -61,32 +65,38 @@ export const SchoolBoardView: React.FC<SchoolBoardViewProps> = ({
   heroTitle = 'لوحة المدرسة',
   heroSubtitle = 'التقارير والأنشطة والفعاليات المعتمدة من مدير المدرسة (للقراءة فقط)',
   topSlot,
+  onOpenSchoolActivitiesArchive,
 }) => {
-  const [approvedActivities, setApprovedActivities] = useState<SupervisorActivity[]>(() =>
+  const [allApprovedActivities, setAllApprovedActivities] = useState<SupervisorActivity[]>(() =>
     appDataService
       .getSupervisorActivities(schoolId)
       .filter((a) => a.approvalStatus === 'approved')
       .sort((a, b) => (b.approvedAt || b.createdAt || 0) - (a.approvedAt || a.createdAt || 0))
   );
 
+  const [nowTick, setNowTick] = useState<number>(() => Date.now());
   const [sectionFilter, setSectionFilter] = useState<'الكل' | 'تقرير' | 'نشاط' | 'فعالية'>('الكل');
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
 
   useEffect(() => {
+    const timer = window.setInterval(() => setNowTick(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
     if (!schoolId) {
-      setApprovedActivities([]);
+      setAllApprovedActivities([]);
       return;
     }
 
     const normalizedSchool = schoolId.trim().toLowerCase();
 
     const syncLocal = () => {
-      setApprovedActivities(
-        appDataService
-          .getSupervisorActivities(schoolId)
-          .filter((a) => a.approvalStatus === 'approved')
-          .sort((a, b) => (b.approvedAt || b.createdAt || 0) - (a.approvedAt || a.createdAt || 0))
-      );
+      const localList = appDataService
+        .getSupervisorActivities(schoolId)
+        .filter((a) => a.approvalStatus === 'approved')
+        .sort((a, b) => (b.approvedAt || b.createdAt || 0) - (a.approvedAt || a.createdAt || 0));
+      setAllApprovedActivities(localList);
     };
     syncLocal();
     const unsubApp = appDataService.subscribe(syncLocal);
@@ -109,7 +119,10 @@ export const SchoolBoardView: React.FC<SchoolBoardViewProps> = ({
                 (b.approvedAt || b.createdAt || 0) - (a.approvedAt || a.createdAt || 0) ||
                 (b.activityDate || '').localeCompare(a.activityDate || '')
             );
-          setApprovedActivities(list);
+          setAllApprovedActivities(list);
+          if (list.length > 0) {
+            appDataService.syncThursdaySchoolActivitiesArchive(schoolId, list, Date.now()).catch(() => {});
+          }
         },
         () => {}
       );
@@ -120,6 +133,22 @@ export const SchoolBoardView: React.FC<SchoolBoardViewProps> = ({
       unsubAct();
     };
   }, [schoolId]);
+
+  // Keep Firestore Thursday weekly archive synced when clock passes Thursday
+  useEffect(() => {
+    if (!schoolId || allApprovedActivities.length === 0) return;
+    appDataService
+      .syncThursdaySchoolActivitiesArchive(schoolId, allApprovedActivities, nowTick)
+      .catch(() => {});
+  }, [schoolId, allApprovedActivities, nowTick]);
+
+  // Only show current active school week on the live board; past weeks move automatically into أرشفة الأنشطة المدرسية
+  const approvedActivities = useMemo(
+    () => allApprovedActivities.filter((a) => !isSchoolActivityArchivedForWeek(a, nowTick)),
+    [allApprovedActivities, nowTick]
+  );
+
+  const archivedPastWeeksCount = allApprovedActivities.length - approvedActivities.length;
 
   const filteredActivities = approvedActivities.filter((act) => {
     if (sectionFilter === 'الكل') return true;
@@ -150,7 +179,7 @@ export const SchoolBoardView: React.FC<SchoolBoardViewProps> = ({
           <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
             <span className="px-3 py-1.5 rounded-full bg-white/95 border border-[#C6DCF2] text-xs font-black text-[#1F5AAA] flex items-center gap-1.5 shadow-2xs">
               <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-              <span>{totalBoardItems} منشور معتمد</span>
+              <span>{totalBoardItems} منشور لهذا الأسبوع</span>
             </span>
           </div>
         </div>
@@ -194,19 +223,41 @@ export const SchoolBoardView: React.FC<SchoolBoardViewProps> = ({
           ))}
         </div>
         <span className="text-[11px] font-bold text-[#5C7085]">
-          مرتبة من الأحدث للأقدم
+          مرتبة من الأحدث للأقدم • تُؤرشف أسبوعياً تلقائياً
         </span>
       </div>
+
+      {/* Notice banner when past-week approved activities were auto-archived */}
+      {archivedPastWeeksCount > 0 && (
+        <div className="bg-[#EEF5FC] rounded-2xl px-4 py-3 border border-[#C6DCF2] flex flex-wrap items-center justify-between gap-2 text-xs">
+          <div className="flex items-center gap-2 text-[#1A3A5F] font-bold">
+            <Archive className="w-4 h-4 text-[#1F5AAA] shrink-0" />
+            <span>
+              تمت أرشفة {archivedPastWeeksCount} تقرير/نشاط من الأسابيع السابقة تلقائياً في سجل الأنشطة المدرسية
+            </span>
+          </div>
+          {onOpenSchoolActivitiesArchive && (
+            <button
+              type="button"
+              onClick={onOpenSchoolActivitiesArchive}
+              className="px-3 py-1.5 rounded-xl bg-[#1F5AAA] hover:bg-[#194B91] text-white text-xs font-black inline-flex items-center gap-1 shadow-2xs cursor-pointer transition"
+            >
+              <span>فتح أرشفة الأنشطة المدرسية</span>
+              <ChevronLeft className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Empty State */}
       {filteredActivities.length === 0 && (
         <div className="bg-white rounded-2xl p-8 border border-[#DCE7F3] text-center space-y-2 shadow-sm">
           <Sparkles className="w-10 h-10 text-[#9BBEDF] mx-auto" />
           <h3 className="font-black text-sm sm:text-base text-[#1A3A5F]">
-            لا توجد منشورات معتمدة في لوحة المدرسة حالياً
+            لا توجد منشورات معتمدة للأسبوع الحالي في لوحة المدرسة
           </h3>
           <p className="text-xs text-[#5C7085] font-semibold max-w-md mx-auto leading-relaxed">
-            تظهر هنا تلقائياً التقارير والأنشطة والفعاليات فور اعتمادها من مدير المدرسة، مرتبة من الأحدث إلى الأقدم.
+            تظهر هنا تلقائياً التقارير والأنشطة والفعاليات فور اعتمادها من مدير المدرسة، وتنتقل تلقائياً كل أسبوع إلى أرشفة الأنشطة المدرسية في القائمة الجانبية.
           </p>
         </div>
       )}

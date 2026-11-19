@@ -40,6 +40,7 @@ type PrincipalViewType =
   | 'dashboard'
   | 'archive_monthly'
   | 'archive_teacher_activities'
+  | 'archive_school_activities'
   | 'archive_cumulative'
   | 'archive_circulars';
 
@@ -253,14 +254,19 @@ export const PrincipalDashboard: React.FC<PrincipalDashboardProps> = ({ session 
       unsubInboxAct = onSnapshot(
         query(collection(db, 'supervisor_activities'), where('schoolId', '==', currentUser.schoolId)),
         (snap) => {
-          actPending = snap.docs
-            .map((d) => d.data() as SupervisorActivity)
-            .filter(
-              (a) =>
-                (a.schoolId || '').trim().toLowerCase() === normalizedSchool &&
-                (!a.approvalStatus || a.approvalStatus === 'pending')
-            ).length;
+          const allActs = snap.docs
+            .map((d) => ({ ...d.data(), id: d.id } as SupervisorActivity))
+            .filter((a) => (a.schoolId || '').trim().toLowerCase() === normalizedSchool);
+          actPending = allActs.filter(
+            (a) => !a.approvalStatus || a.approvalStatus === 'pending'
+          ).length;
           syncPendingCounts();
+          const approvedActs = allActs.filter((a) => a.approvalStatus === 'approved');
+          if (approvedActs.length > 0) {
+            appDataService
+              .syncThursdaySchoolActivitiesArchive(currentUser.schoolId, approvedActs, Date.now())
+              .catch(() => {});
+          }
         },
         () => {}
       );
@@ -709,6 +715,7 @@ export const PrincipalDashboard: React.FC<PrincipalDashboardProps> = ({ session 
             <SchoolBoardView
               schoolId={session.schoolId}
               schoolName={formatArabicSchoolName(session.schoolName, session.schoolId)}
+              onOpenSchoolActivitiesArchive={() => setSidebarView('archive_school_activities')}
             />
           )}
         </>

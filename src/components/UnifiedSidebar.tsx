@@ -20,6 +20,7 @@ import {
   BookOpen,
   Activity,
   UserCheck,
+  Trophy,
 } from 'lucide-react';
 import { UserSession } from '../services/authService';
 import { formatArabicSchoolName, getUserInitials } from '../utils/schoolDisplay';
@@ -29,7 +30,8 @@ export type StudentArchiveSection =
   | 'monthly_homework'
   | 'monthly_grades'
   | 'monthly_circulars'
-  | 'monthly_recommendations';
+  | 'monthly_recommendations'
+  | 'school_activities_archive';
 
 export type UnifiedSidebarView =
   | 'dashboard'
@@ -40,6 +42,7 @@ export type UnifiedSidebarView =
   | 'supervisor_schedule'
   | 'archive_monthly'
   | 'archive_teacher_activities'
+  | 'archive_school_activities'
   | 'archive_cumulative'
   | 'archive_circulars'
   | 'archive_questions'
@@ -402,6 +405,22 @@ export const UnifiedSidebar: React.FC<UnifiedSidebarProps> = ({
                           <button
                             type="button"
                             onClick={() => {
+                              onSelectView('archive_school_activities');
+                              onClose();
+                            }}
+                            className={`w-full min-h-[40px] px-2.5 py-2 rounded-lg text-xs font-bold flex items-center gap-2 transition cursor-pointer ${
+                              activeView === 'archive_school_activities'
+                                ? 'bg-white/18 text-white'
+                                : 'text-white/90 hover:text-white hover:bg-white/10'
+                            }`}
+                          >
+                            <Trophy className="w-3.5 h-3.5 text-amber-200 shrink-0" />
+                            <span className="truncate">أرشفة الأنشطة المدرسية</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => {
                               onSelectView('archive_cumulative');
                               onClose();
                             }}
@@ -581,6 +600,22 @@ export const UnifiedSidebar: React.FC<UnifiedSidebarProps> = ({
                           >
                             <Sparkles className="w-3.5 h-3.5 text-amber-200 shrink-0" />
                             <span className="truncate">ارشيف توصيات المعلم الشهري</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              onSelectView('school_activities_archive');
+                              onClose();
+                            }}
+                            className={`w-full min-h-[40px] px-2.5 py-2 rounded-lg text-xs font-bold flex items-center gap-2 transition cursor-pointer ${
+                              activeView === 'school_activities_archive'
+                                ? 'bg-white/18 text-white'
+                                : 'text-white/90 hover:text-white hover:bg-white/10'
+                            }`}
+                          >
+                            <Trophy className="w-3.5 h-3.5 text-amber-200 shrink-0" />
+                            <span className="truncate">أرشفة الأنشطة المدرسية</span>
                           </button>
                         </>
                       )}

@@ -543,7 +543,7 @@
     },
     "/monthlyReports/{reportId}": {
       "schema": "gradeRecord",
-      "description": "Collection storing archived monthly and cumulative performance reports"
+      "description": "Collection storing archived monthly reports, weekly teacher activity archives, weekly student homework archives, and weekly school activities archives"
     },
     "/monthlyGradebooks/{recordId}": {
       "schema": "gradeRecord",

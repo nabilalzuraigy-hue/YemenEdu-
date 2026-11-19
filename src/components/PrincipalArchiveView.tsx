@@ -16,6 +16,12 @@ import {
   Users,
   ChevronDown,
   Activity,
+  Trophy,
+  Flag,
+  GraduationCap,
+  Image as ImageIcon,
+  Calendar,
+  X,
 } from 'lucide-react';
 import { collection, query, where, onSnapshot } from 'firebase/firestore';
 import { db } from '../firebase/config';
@@ -24,7 +30,16 @@ import {
   HomeworkSubmission,
   MonthlyReportRecord,
   TeacherActivityArchiveBatch,
+  SchoolActivityArchiveBatch,
+  SchoolActivityArchiveItem,
+  SupervisorActivity,
+  SupervisorActivityCategory,
   appDataService,
+  formatArabicDateTime,
+  getGradeLabelAr,
+  getHomeworkArchiveCutoffInfo,
+  getSchoolActivityTimestamp,
+  isSchoolActivityArchivedForWeek,
 } from '../services/appData';
 import { authService } from '../services/authService';
 import { PrincipalStudentReportItem } from './PrincipalReportPdfModal';
@@ -35,7 +50,12 @@ import {
 } from '../utils/schoolDisplay';
 
 interface PrincipalArchiveViewProps {
-  view: 'archive_monthly' | 'archive_teacher_activities' | 'archive_cumulative' | 'archive_circulars';
+  view:
+    | 'archive_monthly'
+    | 'archive_teacher_activities'
+    | 'archive_school_activities'
+    | 'archive_cumulative'
+    | 'archive_circulars';
   schoolId: string;
   schoolName: string;
   submissions: HomeworkSubmission[];
@@ -86,33 +106,79 @@ export const PrincipalArchiveView: React.FC<PrincipalArchiveViewProps> = ({
   const [selectedReportDetail, setSelectedReportDetail] = useState<any | null>(null);
   const [savedMonthlyReports, setSavedMonthlyReports] = useState<MonthlyReportRecord[]>([]);
   const [teacherActivityBatches, setTeacherActivityBatches] = useState<TeacherActivityArchiveBatch[]>([]);
+  const [schoolActivityBatches, setSchoolActivityBatches] = useState<SchoolActivityArchiveBatch[]>([]);
+  const [approvedSchoolActivities, setApprovedSchoolActivities] = useState<SupervisorActivity[]>(() =>
+    schoolId
+      ? appDataService.getSupervisorActivities(schoolId).filter((a) => a.approvalStatus === 'approved')
+      : []
+  );
+  const [selectedSchoolActivityCat, setSelectedSchoolActivityCat] = useState<'الكل' | 'تقرير' | 'نشاط' | 'فعالية'>('الكل');
+  const [lightboxImage, setLightboxImage] = useState<string | null>(null);
 
   React.useEffect(() => {
     if (!schoolId) return;
+    const normalizedSchool = schoolId.trim().toLowerCase();
     appDataService.getArchivedMonthlyReports(schoolId).then(setSavedMonthlyReports).catch(() => {});
     appDataService.getArchivedTeacherActivityBatches(schoolId).then(setTeacherActivityBatches).catch(() => {});
+    appDataService.getArchivedSchoolActivityBatches(schoolId).then(setSchoolActivityBatches).catch(() => {});
 
+    let unsubReports = () => {};
+    let unsubAct = () => {};
     try {
       const qRep = query(collection(db, 'monthlyReports'), where('schoolId', '==', schoolId));
-      const unsub = onSnapshot(
+      unsubReports = onSnapshot(
         qRep,
         (snap) => {
           const allDocs = snap.docs.map((d) => d.data() as any);
           setSavedMonthlyReports(
-            allDocs.filter((r) => r.recordType !== 'teacher_activities_archive' && r.recordType !== 'monthly_homework_archive') as MonthlyReportRecord[]
+            allDocs.filter(
+              (r) =>
+                r.recordType !== 'teacher_activities_archive' &&
+                r.recordType !== 'monthly_homework_archive' &&
+                r.recordType !== 'school_activities_archive'
+            ) as MonthlyReportRecord[]
           );
           setTeacherActivityBatches(
             (allDocs.filter((r) => r.recordType === 'teacher_activities_archive') as TeacherActivityArchiveBatch[]).sort(
               (a, b) => (b.archivedTimestamp || 0) - (a.archivedTimestamp || 0)
             )
           );
+          setSchoolActivityBatches(
+            (allDocs.filter((r) => r.recordType === 'school_activities_archive') as SchoolActivityArchiveBatch[]).sort(
+              (a, b) => (b.archivedTimestamp || 0) - (a.archivedTimestamp || 0)
+            )
+          );
         },
         () => {}
       );
-      return () => unsub();
-    } catch {
-      return undefined;
-    }
+    } catch {}
+
+    try {
+      const qAct = query(collection(db, 'supervisor_activities'), where('schoolId', '==', schoolId));
+      unsubAct = onSnapshot(
+        qAct,
+        (snap) => {
+          const list = snap.docs
+            .map((d) => ({ ...d.data(), id: d.id } as SupervisorActivity))
+            .filter(
+              (a) =>
+                (a.schoolId || '').trim().toLowerCase() === normalizedSchool &&
+                a.approvalStatus === 'approved'
+            )
+            .sort((a, b) => (b.approvedAt || b.createdAt || 0) - (a.approvedAt || a.createdAt || 0));
+          setApprovedSchoolActivities(list);
+          if (list.length > 0) {
+            appDataService.syncThursdaySchoolActivitiesArchive(schoolId, list, Date.now()).catch(() => {});
+          }
+        },
+        () => {}
+      );
+    } catch {}
+
+    return () => {
+      unsubReports();
+      unsubAct();
+    };
   }, [schoolId]);
 
   // Strict Grade Matching Helper (Preserving complete class isolation)
@@ -324,6 +390,121 @@ export const PrincipalArchiveView: React.FC<PrincipalArchiveViewProps> = ({
       .filter((batch) => batch.activities.length > 0);
   }, [teacherActivityBatches, selectedGrade, selectedMonth, selectedYear, searchQuery]);
 
+  // Merge stored Thursday school activity archive batches with live past-Thursday approved activities
+  const combinedSchoolActivityBatches = useMemo(() => {
+    const byId = new Map<string, SchoolActivityArchiveBatch>();
+    schoolActivityBatches.forEach((b) => byId.set(b.id, b));
+
+    const nowMs = Date.now();
+    approvedSchoolActivities.forEach((act) => {
+      if (!isSchoolActivityArchivedForWeek(act, nowMs)) return;
+      const ts = getSchoolActivityTimestamp(act);
+      if (!ts) return;
+      const info = getHomeworkArchiveCutoffInfo(ts);
+      const docId = `sa_${schoolId}_${info.thursdayKey}`;
+      const existing = byId.get(docId);
+      const imgs = Array.isArray(act.images) ? act.images : [];
+      const item: SchoolActivityArchiveItem = {
+        id: act.id,
+        title: (act.title || '').trim(),
+        category: act.category,
+        subType: act.subType,
+        formalText: (act.formalText || act.details || '').trim(),
+        targetGrade: act.targetGrade || 'الكل',
+        targetClass: act.targetClass || 'الكل',
+        activityDate: act.activityDate || '',
+        createdBy: act.createdBy || 'المشرف',
+        approvedBy: act.approvedBy || 'مدير المدرسة',
+        coverImage: imgs[0],
+        imagesCount: imgs.length,
+        inputType: act.inputType,
+        timestamp: ts,
+        dateLabel: new Date(ts).toLocaleDateString('ar-YE', {
+          year: 'numeric',
+          month: 'short',
+          day: 'numeric',
+        }),
+        timeLabel: formatArabicDateTime(ts),
+      };
+
+      if (existing) {
+        if (!existing.activities.some((x) => x.id === item.id)) {
+          byId.set(docId, {
+            ...existing,
+            activities: [item, ...existing.activities].sort((a, b) => b.timestamp - a.timestamp),
+            activitiesCount: existing.activities.length + 1,
+          });
+        }
+      } else {
+        byId.set(docId, {
+          id: docId,
+          recordType: 'school_activities_archive',
+          schoolId,
+          thursdayKey: info.thursdayKey,
+          weekLabel: info.weekLabel,
+          year: info.year,
+          monthName: info.monthName,
+          archivedAt: info.thuDate.toLocaleDateString('ar-YE', {
+            year: 'numeric',
+            month: 'long',
+            day: 'numeric',
+          }),
+          archivedTimestamp: info.archiveAtMs,
+          autoArchived: true,
+          activitiesCount: 1,
+          activities: [item],
+        });
+      }
+    });
+
+    return Array.from(byId.values()).sort(
+      (a, b) => (b.archivedTimestamp || 0) - (a.archivedTimestamp || 0)
+    );
+  }, [schoolActivityBatches, approvedSchoolActivities, schoolId]);
+
+  const filteredSchoolActivityBatches = useMemo(() => {
+    const normalizeBucket = (cat: SupervisorActivityCategory): 'تقرير' | 'نشاط' | 'فعالية' => {
+      if (cat === 'تقرير') return 'تقرير';
+      if (cat === 'فعالية') return 'فعالية';
+      return 'نشاط';
+    };
+
+    return combinedSchoolActivityBatches
+      .filter((batch) => {
+        if (selectedMonth !== 'all' && batch.monthName !== selectedMonth) return false;
+        if (batch.year && batch.year !== selectedYear) return false;
+        return true;
+      })
+      .map((batch) => {
+        const items = (batch.activities || []).filter((act) => {
+          if (selectedSchoolActivityCat !== 'الكل' && normalizeBucket(act.category) !== selectedSchoolActivityCat) {
+            return false;
+          }
+          if (
+            selectedGrade !== 'all' &&
+            act.targetGrade &&
+            act.targetGrade !== 'الكل' &&
+            !matchesGrade(act.targetGrade, '', selectedGrade)
+          ) {
+            return false;
+          }
+          if (searchQuery.trim()) {
+            const q = searchQuery.toLowerCase();
+            const match =
+              (act.title || '').toLowerCase().includes(q) ||
+              (act.formalText || '').toLowerCase().includes(q) ||
+              (act.createdBy || '').toLowerCase().includes(q) ||
+              (act.subType || '').toLowerCase().includes(q) ||
+              (batch.weekLabel || '').toLowerCase().includes(q);
+            if (!match) return false;
+          }
+          return true;
+        });
+        return { ...batch, activities: items };
+      })
+      .filter((batch) => batch.activities.length > 0);
+  }, [combinedSchoolActivityBatches, selectedMonth, selectedYear, selectedGrade, selectedSchoolActivityCat, searchQuery]);
+
   return (
     <div className="space-y-6 text-right font-['Cairo','Tajawal']">
       
@@ -353,6 +534,12 @@ export const PrincipalArchiveView: React.FC<PrincipalArchiveViewProps> = ({
                   <span>أرشيف أنشطة المعلمين</span>
                 </>
               )}
+              {view === 'archive_school_activities' && (
+                <>
+                  <Trophy className="w-5 h-5 text-[#1F5AAA]" />
+                  <span>أرشفة الأنشطة المدرسية</span>
+                </>
+              )}
               {view === 'archive_cumulative' && (
                 <>
                   <Award className="w-5 h-5 text-[#1F5AAA]" />
@@ -369,6 +556,8 @@ export const PrincipalArchiveView: React.FC<PrincipalArchiveViewProps> = ({
             <p className="text-xs text-slate-600 font-semibold">
               {view === 'archive_teacher_activities'
                 ? 'أرشفة تلقائية أسبوعية كل يوم خميس لجميع أنشطة المعلمين'
+                : view === 'archive_school_activities'
+                ? 'تُؤرشف آلياً كل أسبوع التقارير والأنشطة والفعاليات المدرسية المعتمدة'
                 : 'سجل رقمي معتمد ومؤرشف وفق معايير وزارة التربية والتعليم'}
             </p>
           </div>
@@ -589,6 +778,158 @@ export const PrincipalArchiveView: React.FC<PrincipalArchiveViewProps> = ({
                         </span>
                       </div>
                     ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* VIEW 1C: WEEKLY SCHOOL ACTIVITIES ARCHIVE (تؤرشف آلياً كل أسبوع) */}
+      {view === 'archive_school_activities' && (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <h3 className="font-black text-sm text-[#1A3A5F]">
+              سجل الأنشطة والتقارير والفعاليات المدرسية المؤرشفة أسبوعياً ({filteredSchoolActivityBatches.reduce((sum, b) => sum + b.activities.length, 0)} منشور)
+            </h3>
+            <span className="text-xs text-[#1F5AAA] font-bold bg-[#EEF5FC] px-2.5 py-1 rounded-full border border-[#C6DCF2]">
+              أرشفة تلقائية كل أسبوع (الخميس)
+            </span>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1.5">
+            {(['الكل', 'تقرير', 'نشاط', 'فعالية'] as const).map((cat) => (
+              <button
+                key={`pri-arc-sa-cat-${cat}`}
+                type="button"
+                onClick={() => setSelectedSchoolActivityCat(cat)}
+                className={`px-3.5 py-1.5 rounded-xl text-xs font-black transition cursor-pointer border ${
+                  selectedSchoolActivityCat === cat
+                    ? 'bg-[#1F5AAA] text-white border-[#194B91] shadow-2xs'
+                    : 'bg-white text-[#1A3A5F] hover:bg-[#EEF5FC] border-[#DCE7F3]'
+                }`}
+              >
+                {cat === 'الكل' ? 'الكل' : cat === 'تقرير' ? 'التقارير' : cat === 'نشاط' ? 'الأنشطة' : 'الفعاليات'}
+              </button>
+            ))}
+          </div>
+
+          {filteredSchoolActivityBatches.length === 0 ? (
+            <div className="bg-white rounded-2xl p-8 border border-[#DCE7F3] text-center space-y-2">
+              <Trophy className="w-10 h-10 text-[#9BBEDF] mx-auto" />
+              <p className="text-slate-700 font-black text-sm">
+                لا توجد أنشطة مدرسية مؤرشفة مطابقة لخيارات البحث الحالية
+              </p>
+              <p className="text-xs text-slate-500 font-semibold">
+                تنتقل التقارير والأنشطة والفعاليات المعتمدة تلقائياً كل أسبوع من لوحة المدرسة إلى هذا الأرشيف.
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {filteredSchoolActivityBatches.map((batch) => (
+                <div
+                  key={batch.id}
+                  className="bg-white rounded-2xl p-4 sm:p-5 border border-[#DCE7F3] shadow-sm space-y-3"
+                >
+                  <div className="flex items-center justify-between flex-wrap gap-2 pb-2.5 border-b border-slate-200">
+                    <div className="flex items-center gap-2">
+                      <Calendar className="w-4 h-4 text-[#1F5AAA] shrink-0" />
+                      <h4 className="font-black text-sm text-[#1A3A5F]">
+                        {batch.weekLabel}
+                      </h4>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200">
+                        أرشفة تلقائية أسبوعية (الخميس)
+                      </span>
+                      <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] tabular-nums">
+                        {batch.activities.length} منشور
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+                    {batch.activities.map((act) => {
+                      const bucket = act.category === 'تقرير' ? 'تقرير' : act.category === 'فعالية' ? 'فعالية' : 'نشاط';
+                      const liveMatch = approvedSchoolActivities.find((x) => x.id === act.id);
+                      const coverSrc =
+                        act.coverImage ||
+                        (liveMatch && Array.isArray(liveMatch.images) ? liveMatch.images[0] : undefined);
+                      const classLabel =
+                        !act.targetGrade || act.targetGrade === 'الكل'
+                          ? 'جميع الصفوف'
+                          : `${getGradeLabelAr(act.targetGrade)}${
+                              act.targetClass && act.targetClass !== 'الكل'
+                                ? ` — فصل ${act.targetClass}`
+                                : ''
+                            }`;
+
+                      return (
+                        <article
+                          key={act.id}
+                          className="rounded-2xl border border-[#DCE7F3] bg-[#F8FBFF] overflow-hidden flex flex-col justify-between"
+                        >
+                          {coverSrc && (
+                            <button
+                              type="button"
+                              onClick={() => setLightboxImage(coverSrc)}
+                              className="block w-full aspect-video bg-slate-100 overflow-hidden cursor-pointer group relative"
+                              title="عرض الصورة بالحجم الكامل"
+                            >
+                              <img
+                                src={coverSrc}
+                                alt={act.title}
+                                className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                              />
+                              {act.imagesCount && act.imagesCount > 1 && (
+                                <span className="absolute bottom-1.5 left-1.5 px-2 py-0.5 rounded bg-black/60 text-white text-[10px] font-bold flex items-center gap-1">
+                                  <ImageIcon className="w-3 h-3" />
+                                  <span>{act.imagesCount} صور</span>
+                                </span>
+                              )}
+                            </button>
+                          )}
+
+                          <div className="p-3.5 space-y-2 flex-1 flex flex-col justify-between">
+                            <div className="space-y-1.5">
+                              <div className="flex flex-wrap items-center justify-between gap-1.5">
+                                <div className="flex flex-wrap items-center gap-1">
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] text-[10px] font-black">
+                                    {bucket === 'فعالية' ? <Flag className="w-3 h-3" /> : bucket === 'تقرير' ? <FileText className="w-3 h-3" /> : <Trophy className="w-3 h-3" />}
+                                    <span>{bucket}</span>
+                                  </span>
+                                  {act.subType && (
+                                    <span className="px-2 py-0.5 rounded-full bg-white text-[#1A3A5F] border border-slate-200 text-[10px] font-bold">
+                                      {act.subType}
+                                    </span>
+                                  )}
+                                </div>
+                                <span className="text-[10px] text-[#5C7085] font-bold tabular-nums">
+                                  {act.activityDate || act.dateLabel}
+                                </span>
+                              </div>
+
+                              <h5 className="font-black text-xs sm:text-sm text-[#1A3A5F] leading-snug">
+                                {act.title}
+                              </h5>
+
+                              <p className="text-xs text-slate-700 leading-relaxed whitespace-pre-wrap">
+                                {act.formalText}
+                              </p>
+                            </div>
+
+                            <div className="pt-2 border-t border-slate-200 flex flex-wrap items-center justify-between gap-1.5 text-[10px] text-[#5C7085] font-semibold">
+                              <span className="inline-flex items-center gap-1 text-[#1A3A5F] font-bold">
+                                <GraduationCap className="w-3 h-3 text-[#1F5AAA]" />
+                                <span>{classLabel}</span>
+                              </span>
+                              <span>المشرف: {act.createdBy} • اعتماد: {act.approvedBy || 'مدير المدرسة'}</span>
+                            </div>
+                          </div>
+                        </article>
+                      );
+                    })}
                   </div>
                 </div>
               ))}
@@ -850,6 +1191,33 @@ export const PrincipalArchiveView: React.FC<PrincipalArchiveViewProps> = ({
                 إغلاق
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Fullscreen Image Lightbox for Archived School Activities */}
+      {lightboxImage && (
+        <div
+          onClick={() => setLightboxImage(null)}
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="relative max-w-2xl w-full bg-white rounded-2xl p-2 shadow-2xl border border-[#DCE7F3]"
+          >
+            <button
+              type="button"
+              onClick={() => setLightboxImage(null)}
+              className="absolute top-3 left-3 z-10 w-8 h-8 rounded-full bg-black/75 text-white flex items-center justify-center cursor-pointer"
+              aria-label="إغلاق الصورة"
+            >
+              <X className="w-4 h-4" />
+            </button>
+            <img
+              src={lightboxImage}
+              alt="معاينة الصورة"
+              className="w-full max-h-[80dvh] object-contain rounded-xl bg-slate-900"
+            />
           </div>
         </div>
       )}

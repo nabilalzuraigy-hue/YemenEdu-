@@ -47,6 +47,11 @@ import {
   MonthlyGradebookRecord,
   MonthlyGradebookStudent,
   MonthlyHomeworkArchiveBatch,
+  SchoolActivityArchiveBatch,
+  SchoolActivityArchiveItem,
+  SupervisorActivity,
+  getSchoolActivityTimestamp,
+  isSchoolActivityArchivedForWeek,
   isQuestionArchivedForStudentWeek,
   getHomeworkArchiveCutoffInfo,
   TeacherRecommendation,
@@ -193,6 +198,12 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
     session.schoolId ? appDataService.getQuestions(studentGrade as any, undefined, session.schoolId) : []
   );
   const [archivedHomeworkBatches, setArchivedHomeworkBatches] = useState<MonthlyHomeworkArchiveBatch[]>([]);
+  const [archivedSchoolActivityBatches, setArchivedSchoolActivityBatches] = useState<SchoolActivityArchiveBatch[]>([]);
+  const [approvedSchoolActivities, setApprovedSchoolActivities] = useState<SupervisorActivity[]>(() =>
+    session.schoolId
+      ? appDataService.getSupervisorActivities(session.schoolId).filter((a) => a.approvalStatus === 'approved')
+      : []
+  );
   const [nowTick, setNowTick] = useState<number>(() => Date.now());
   const [announcements, setAnnouncements] = useState<Announcement[]>(() =>
     session.schoolId ? appDataService.getAnnouncements('student', session.schoolId) : []
@@ -415,6 +426,84 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
       (a, b) => (b.archivedTimestamp || 0) - (a.archivedTimestamp || 0)
     );
   }, [archivedHomeworkBatches, rawClassQuestions, closedQuestionIds, nowTick, session.schoolId, session.code, studentGrade]);
+
+  // Keep Firestore Thursday weekly School Activities Archive synced and merged with past-week approved activities
+  useEffect(() => {
+    if (!currentUser?.schoolId || approvedSchoolActivities.length === 0) return;
+    appDataService
+      .syncThursdaySchoolActivitiesArchive(currentUser.schoolId, approvedSchoolActivities, nowTick)
+      .catch(() => {});
+  }, [currentUser?.schoolId, approvedSchoolActivities, nowTick]);
+
+  const combinedSchoolActivityArchives = useMemo(() => {
+    const byId = new Map<string, SchoolActivityArchiveBatch>();
+    archivedSchoolActivityBatches.forEach((b) => byId.set(b.id, b));
+
+    approvedSchoolActivities.forEach((act) => {
+      if (!isSchoolActivityArchivedForWeek(act, nowTick)) return;
+      const ts = getSchoolActivityTimestamp(act);
+      if (!ts) return;
+      const info = getHomeworkArchiveCutoffInfo(ts);
+      const batchId = `sa_${session.schoolId}_${info.thursdayKey}`;
+      const existing = byId.get(batchId);
+      const imgs = Array.isArray(act.images) ? act.images : [];
+      const item: SchoolActivityArchiveItem = {
+        id: act.id,
+        title: (act.title || '').trim(),
+        category: act.category,
+        subType: act.subType,
+        formalText: (act.formalText || act.details || '').trim(),
+        targetGrade: act.targetGrade || 'الكل',
+        targetClass: act.targetClass || 'الكل',
+        activityDate: act.activityDate || '',
+        createdBy: act.createdBy || 'المشرف',
+        approvedBy: act.approvedBy || 'مدير المدرسة',
+        coverImage: imgs[0],
+        imagesCount: imgs.length,
+        inputType: act.inputType,
+        timestamp: ts,
+        dateLabel: new Date(ts).toLocaleDateString('ar-YE', {
+          year: 'numeric',
+          month: 'short',
+          day: 'numeric',
+        }),
+        timeLabel: formatArabicDateTime(ts),
+      };
+
+      if (existing) {
+        if (!existing.activities.some((x) => x.id === item.id)) {
+          byId.set(batchId, {
+            ...existing,
+            activities: [item, ...existing.activities].sort((a, b) => b.timestamp - a.timestamp),
+            activitiesCount: existing.activities.length + 1,
+          });
+        }
+      } else {
+        byId.set(batchId, {
+          id: batchId,
+          recordType: 'school_activities_archive',
+          schoolId: session.schoolId || '',
+          thursdayKey: info.thursdayKey,
+          weekLabel: info.weekLabel,
+          year: info.year,
+          monthName: info.monthName,
+          archivedAt: info.thuDate.toLocaleDateString('ar-YE', {
+            year: 'numeric',
+            month: 'long',
+            day: 'numeric',
+          }),
+          archivedTimestamp: info.archiveAtMs,
+          autoArchived: true,
+          activitiesCount: 1,
+          activities: [item],
+        });
+      }
+    });
+
+    return Array.from(byId.values()).sort(
+      (a, b) => (b.archivedTimestamp || 0) - (a.archivedTimestamp || 0)
+    );
+  }, [archivedSchoolActivityBatches, approvedSchoolActivities, nowTick, session.schoolId]);
 
   // Persistent Read/Seen Tracking for Unread Badges (التعاميم / التوصيات / الدرجات)
   const seenAnnStorageKey = `azal_seen_ann_${session.schoolId}_${session.code}`;
@@ -668,7 +757,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
       );
     } catch (_) {}
 
-    // 7. Direct Firestore query: Thursday-archived Monthly Homework Batches
+    // 7. Direct Firestore query: Thursday-archived Monthly Homework & School Activities Batches
     let unsubHwArchive = () => {};
     try {
       if (currentUser?.schoolId) {
@@ -679,15 +768,47 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
         unsubHwArchive = onSnapshot(
           qHwArc,
           (snap) => {
-            const batches = snap.docs
-              .map((d) => d.data() as MonthlyHomeworkArchiveBatch)
+            const allDocs = snap.docs.map((d) => d.data() as any);
+            const batches = allDocs
               .filter(
                 (r) =>
                   r.recordType === 'monthly_homework_archive' &&
                   r.studentCode === session.code
               )
-              .sort((a, b) => (b.archivedTimestamp || 0) - (a.archivedTimestamp || 0));
+              .sort((a, b) => (b.archivedTimestamp || 0) - (a.archivedTimestamp || 0)) as MonthlyHomeworkArchiveBatch[];
             setArchivedHomeworkBatches(batches);
+
+            const schoolActBatches = allDocs
+              .filter((r) => r.recordType === 'school_activities_archive')
+              .sort((a, b) => (b.archivedTimestamp || 0) - (a.archivedTimestamp || 0)) as SchoolActivityArchiveBatch[];
+            setArchivedSchoolActivityBatches(schoolActBatches);
+          },
+          () => {}
+        );
+      }
+    } catch (_) {}
+
+    // 7b. Direct Firestore query: Approved School Activities (read-only for archive fallback — NO attendance)
+    let unsubSchoolActs = () => {};
+    try {
+      if (currentUser?.schoolId) {
+        const normalizedSchool = currentUser.schoolId.trim().toLowerCase();
+        const qSchoolAct = query(
+          collection(db, 'supervisor_activities'),
+          where('schoolId', '==', currentUser.schoolId)
+        );
+        unsubSchoolActs = onSnapshot(
+          qSchoolAct,
+          (snap) => {
+            const list = snap.docs
+              .map((d) => ({ ...d.data(), id: d.id } as SupervisorActivity))
+              .filter(
+                (a) =>
+                  (a.schoolId || '').trim().toLowerCase() === normalizedSchool &&
+                  a.approvalStatus === 'approved'
+              )
+              .sort((a, b) => (b.approvedAt || b.createdAt || 0) - (a.approvedAt || a.createdAt || 0));
+            setApprovedSchoolActivities(list);
           },
           () => {}
         );
@@ -770,6 +891,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
       unsubSubmissions();
       unsubGb();
       unsubHwArchive();
+      unsubSchoolActs();
       unsubSchedules();
       unsubOwnAttendance();
     };
@@ -1288,6 +1410,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
             <SchoolBoardView
               schoolId={session.schoolId}
               schoolName={formatArabicSchoolName(session.schoolName, session.schoolId)}
+              onOpenSchoolActivitiesArchive={() => setActiveArchiveModal('school_activities_archive')}
               topSlot={
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   <button
@@ -2723,7 +2846,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
         onOpenAccount={() => setIsAccountModalOpen(true)}
       />
 
-      {/* Student Archive 5 Sub-sections Modal */}
+      {/* Student Archive 6 Sub-sections Modal */}
       <StudentArchiveModal
         isOpen={!!activeArchiveModal}
         onClose={() => setActiveArchiveModal(null)}
@@ -2731,6 +2854,8 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
         session={session}
         questions={questions}
         archivedHomeworkBatches={combinedArchivedHomeworkBatches}
+        archivedSchoolActivityBatches={combinedSchoolActivityArchives}
+        approvedSchoolActivities={approvedSchoolActivities}
         submissions={studentSubmissions}
         studentGrades={studentGrades}
         archivedGradebooks={archivedGradebooks}

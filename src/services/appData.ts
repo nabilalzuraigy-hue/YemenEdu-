@@ -166,9 +166,47 @@ export interface MonthlyHomeworkArchiveBatch {
   questions: MonthlyHomeworkArchiveItem[];
 }
 
+export interface SchoolActivityArchiveItem {
+  id: string;
+  title: string;
+  category: SupervisorActivityCategory;
+  subType?: string;
+  formalText: string;
+  targetGrade: string;
+  targetClass?: string;
+  activityDate: string;
+  createdBy: string;
+  approvedBy?: string;
+  coverImage?: string;
+  imagesCount: number;
+  inputType?: SupervisorReportInputType;
+  timestamp: number;
+  dateLabel: string;
+  timeLabel: string;
+}
+
+export interface SchoolActivityArchiveBatch {
+  id: string;
+  recordType: 'school_activities_archive';
+  schoolId: string;
+  thursdayKey: string;
+  weekLabel: string;
+  year: number;
+  monthName: string;
+  archivedAt: string;
+  archivedTimestamp: number;
+  autoArchived: boolean;
+  activitiesCount: number;
+  activities: SchoolActivityArchiveItem[];
+}
+
 export interface MonthlyReportRecord {
   id: string; // e.g. `${schoolId}_${year}_${monthName}`
-  recordType?: 'monthly_report' | 'teacher_activities_archive' | 'monthly_homework_archive';
+  recordType?:
+    | 'monthly_report'
+    | 'teacher_activities_archive'
+    | 'monthly_homework_archive'
+    | 'school_activities_archive';
   schoolId: string;
   monthName: string;
   year: number;
@@ -349,6 +387,23 @@ export function getHomeworkArchiveCutoffInfo(ts: number): {
 
 export function isQuestionArchivedForStudentWeek(q: any, nowMs: number = Date.now()): boolean {
   const ts = getQuestionTimestamp(q);
+  if (!ts || ts <= 0) return false;
+  const { archiveAtMs } = getHomeworkArchiveCutoffInfo(ts);
+  return nowMs >= archiveAtMs;
+}
+
+export function getSchoolActivityTimestamp(act: any): number {
+  if (typeof act?.approvedAt === 'number' && act.approvedAt > 0) return act.approvedAt;
+  if (typeof act?.createdAt === 'number' && act.createdAt > 0) return act.createdAt;
+  if (typeof act?.activityDate === 'string' && act.activityDate.trim()) {
+    const parsed = Date.parse(`${act.activityDate.trim()}T09:00:00`);
+    if (!Number.isNaN(parsed)) return parsed;
+  }
+  return 0;
+}
+
+export function isSchoolActivityArchivedForWeek(act: any, nowMs: number = Date.now()): boolean {
+  const ts = getSchoolActivityTimestamp(act);
   if (!ts || ts <= 0) return false;
   const { archiveAtMs } = getHomeworkArchiveCutoffInfo(ts);
   return nowMs >= archiveAtMs;
@@ -1573,7 +1628,12 @@ class AppDataService {
       const snap = await getDocs(q);
       return snap.docs
         .map((d) => d.data() as MonthlyReportRecord)
-        .filter((r) => r.recordType !== 'teacher_activities_archive' && r.recordType !== 'monthly_homework_archive');
+        .filter(
+          (r) =>
+            r.recordType !== 'teacher_activities_archive' &&
+            r.recordType !== 'monthly_homework_archive' &&
+            r.recordType !== 'school_activities_archive'
+        );
     } catch (error) {
       console.warn('Notice reading monthlyReports from Firestore:', error);
       return [];
@@ -1883,6 +1943,156 @@ class AppDataService {
         existingById.set(docId, batchRecord);
       } catch (error) {
         console.warn('Notice archiving Thursday teacher activities:', error);
+      }
+    }
+
+    return Array.from(existingById.values()).sort(
+      (a, b) => (b.archivedTimestamp || 0) - (a.archivedTimestamp || 0)
+    );
+  }
+
+  public async getArchivedSchoolActivityBatches(
+    schoolId: string
+  ): Promise<SchoolActivityArchiveBatch[]> {
+    await ensureAuthReady();
+    try {
+      const q = query(collection(db, 'monthlyReports'), where('schoolId', '==', schoolId));
+      const snap = await getDocs(q);
+      return snap.docs
+        .map((d) => d.data() as SchoolActivityArchiveBatch)
+        .filter((r) => r.recordType === 'school_activities_archive')
+        .sort((a, b) => (b.archivedTimestamp || 0) - (a.archivedTimestamp || 0));
+    } catch (error) {
+      console.warn('Notice reading school activity archives from Firestore:', error);
+      return [];
+    }
+  }
+
+  public async syncThursdaySchoolActivitiesArchive(
+    schoolId: string,
+    activitiesList: SupervisorActivity[],
+    nowMs: number = Date.now()
+  ): Promise<SchoolActivityArchiveBatch[]> {
+    if (!schoolId || activitiesList.length === 0) return [];
+    await ensureAuthReady();
+
+    const approvedList = activitiesList.filter((a) => a.approvalStatus === 'approved');
+    if (approvedList.length === 0) {
+      return this.getArchivedSchoolActivityBatches(schoolId);
+    }
+
+    const grouped = new Map<
+      string,
+      {
+        thuDate: Date;
+        archiveAtMs: number;
+        monthName: string;
+        year: number;
+        weekLabel: string;
+        items: SchoolActivityArchiveItem[];
+      }
+    >();
+
+    for (const act of approvedList) {
+      const ts = getSchoolActivityTimestamp(act);
+      if (!ts || ts <= 0) continue;
+      const info = getHomeworkArchiveCutoffInfo(ts);
+      if (nowMs < info.archiveAtMs) {
+        continue; // Keep active on School Board until Thursday cutoff arrives
+      }
+
+      const d = new Date(ts);
+      const imgs = Array.isArray(act.images) ? act.images : [];
+      const item: SchoolActivityArchiveItem = cleanFirestorePayload({
+        id: act.id,
+        title: (act.title || '').trim(),
+        category: act.category,
+        subType: act.subType,
+        formalText: (act.formalText || act.details || '').trim(),
+        targetGrade: act.targetGrade || 'الكل',
+        targetClass: act.targetClass || 'الكل',
+        activityDate: act.activityDate || '',
+        createdBy: act.createdBy || 'المشرف',
+        approvedBy: act.approvedBy || 'مدير المدرسة',
+        coverImage: imgs[0] && imgs[0].length <= 180_000 ? imgs[0] : undefined,
+        imagesCount: imgs.length,
+        inputType: act.inputType,
+        timestamp: ts,
+        dateLabel: d.toLocaleDateString('ar-YE', {
+          year: 'numeric',
+          month: 'short',
+          day: 'numeric',
+        }),
+        timeLabel: formatArabicDateTime(ts),
+      });
+
+      const existing = grouped.get(info.thursdayKey);
+      if (existing) {
+        if (!existing.items.some((x) => x.id === item.id)) {
+          existing.items.push(item);
+        }
+      } else {
+        grouped.set(info.thursdayKey, {
+          thuDate: info.thuDate,
+          archiveAtMs: info.archiveAtMs,
+          monthName: info.monthName,
+          year: info.year,
+          weekLabel: info.weekLabel,
+          items: [item],
+        });
+      }
+    }
+
+    if (grouped.size === 0) {
+      return this.getArchivedSchoolActivityBatches(schoolId);
+    }
+
+    const existingBatches = await this.getArchivedSchoolActivityBatches(schoolId);
+    const existingById = new Map(existingBatches.map((b) => [b.id, b]));
+
+    for (const [thursdayKey, group] of grouped.entries()) {
+      const docId = `sa_${schoolId}_${thursdayKey}`;
+      const prevBatch = existingById.get(docId);
+
+      const mergedMap = new Map<string, SchoolActivityArchiveItem>();
+      (prevBatch?.activities || []).forEach((it) => mergedMap.set(it.id, it));
+      group.items.forEach((it) => mergedMap.set(it.id, it));
+      let mergedItems = Array.from(mergedMap.values()).sort((a, b) => b.timestamp - a.timestamp);
+
+      if (prevBatch && prevBatch.activities.length === mergedItems.length) {
+        continue;
+      }
+
+      // Guard against Firestore 1MB document limit when batch holds many cover photos
+      const estimatedBytes = mergedItems.reduce((sum, it) => sum + (it.coverImage?.length || 0), 0);
+      if (estimatedBytes > 620_000) {
+        mergedItems = mergedItems.map(({ coverImage: _drop, ...rest }) => rest);
+      }
+
+      const batchRecord: SchoolActivityArchiveBatch = {
+        id: docId,
+        recordType: 'school_activities_archive',
+        schoolId,
+        thursdayKey,
+        weekLabel: group.weekLabel,
+        year: group.year,
+        monthName: group.monthName,
+        archivedAt: group.thuDate.toLocaleDateString('ar-YE', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric',
+        }),
+        archivedTimestamp: group.archiveAtMs,
+        autoArchived: true,
+        activitiesCount: mergedItems.length,
+        activities: mergedItems,
+      };
+
+      try {
+        await setDoc(doc(db, 'monthlyReports', docId), cleanFirestorePayload(batchRecord));
+        existingById.set(docId, batchRecord);
+      } catch (error) {
+        console.warn('Notice archiving Thursday school activities:', error);
       }
     }
 
