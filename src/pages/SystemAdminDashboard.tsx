@@ -275,10 +275,10 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
         const rows = group.codes.map((c, idx) => ({
           'الرقم': idx + 1,
           'كود التفعيل': c.code,
-          'نوع الحساب': c.roleTitleAr || (c.role === 'student' ? 'طالب' : c.role === 'teacher' ? 'معلم' : 'مدير'),
+          'نوع الحساب': c.roleTitleAr || (c.role === 'student' ? 'طالب' : c.role === 'teacher' ? 'معلم' : c.role === 'supervisor' ? 'مشرف' : 'مدير'),
           'اسم صاحب الحساب': c.role === 'principal' || c.code.startsWith('M-') ? (c.assignedToName || '—').replace(/صف\s*8|الصف\s*8/gi, '').trim() : (c.assignedToName || '—'),
-          'الصف الدراسي': c.role === 'principal' || c.code.startsWith('M-') ? '—' : (c.grade ? `الصف ${c.grade}` : '—'),
-          'المادة': c.role === 'principal' || c.code.startsWith('M-') ? 'مدير المدرسة - كل الصفوف' : (c.subject || '—'),
+          'الصف الدراسي': c.role === 'principal' || c.code.startsWith('M-') || c.role === 'supervisor' ? 'كل الصفوف' : (c.grade ? `الصف ${c.grade}` : '—'),
+          'المادة': c.role === 'principal' || c.code.startsWith('M-') ? 'مدير المدرسة - كل الصفوف' : c.role === 'supervisor' ? 'مشرف المدرسة - كل الصفوف' : (c.subject || '—'),
           'المدرسة': c.schoolName || group.schoolName,
           'رقم الهاتف': c.phone || '—',
           'حالة الكود': c.isActivated ? 'مفعل نشط' : 'غير مفعل',
@@ -372,10 +372,10 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
       const rows = schoolCodes.map((c, idx) => ({
         'الرقم': idx + 1,
         'كود التفعيل': c.code,
-        'نوع الحساب': c.roleTitleAr || (c.role === 'student' ? 'طالب' : c.role === 'teacher' ? 'معلم' : 'مدير'),
+        'نوع الحساب': c.roleTitleAr || (c.role === 'student' ? 'طالب' : c.role === 'teacher' ? 'معلم' : c.role === 'supervisor' ? 'مشرف' : 'مدير'),
         'اسم صاحب الحساب': c.role === 'principal' || c.code.startsWith('M-') ? (c.assignedToName || '—').replace(/صف\s*8|الصف\s*8/gi, '').trim() : (c.assignedToName || '—'),
-        'الصف الدراسي': c.role === 'principal' || c.code.startsWith('M-') ? '—' : (c.grade ? `الصف ${c.grade}` : '—'),
-        'المادة': c.role === 'principal' || c.code.startsWith('M-') ? 'مدير المدرسة - كل الصفوف' : (c.subject || '—'),
+        'الصف الدراسي': c.role === 'principal' || c.code.startsWith('M-') || c.role === 'supervisor' ? 'كل الصفوف' : (c.grade ? `الصف ${c.grade}` : '—'),
+        'المادة': c.role === 'principal' || c.code.startsWith('M-') ? 'مدير المدرسة - كل الصفوف' : c.role === 'supervisor' ? 'مشرف المدرسة - كل الصفوف' : (c.subject || '—'),
         'المدرسة': c.schoolName || targetSchoolName,
         'رقم الهاتف': c.phone || '—',
         'حالة الكود': c.isActivated ? 'مفعل نشط' : 'غير مفعل',
@@ -510,6 +510,10 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
       codeToUse = `M-${school.prefix}-${rnd}`;
       roleTitle = 'مدير مدرسة';
       displayName = singleName.replace(/صف\s*8|الصف\s*8/gi, '').trim();
+    } else if (singleRole === 'supervisor') {
+      codeToUse = `SUP-${school.prefix}-${rnd}`;
+      roleTitle = 'مشرف';
+      displayName = singleName.trim();
     } else {
       codeToUse = `STU-${singleGrade}-${school.prefix}-${rnd}`;
       roleTitle = `طالب (الصف ${singleGrade})`;
@@ -524,8 +528,8 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
       phone: singlePhone,
       schoolId: school.id,
       schoolName: school.name,
-      grade: singleRole === 'principal' ? undefined : singleGrade,
-      class: singleRole === 'principal' ? undefined : singleGrade,
+      grade: singleRole === 'principal' || singleRole === 'supervisor' ? undefined : singleGrade,
+      class: singleRole === 'principal' || singleRole === 'supervisor' ? undefined : singleGrade,
       subject: singleRole === 'teacher' ? singleSubject.nameAr : undefined,
       isTest: false,
       createdAt: new Date().toISOString(),
@@ -1037,9 +1041,10 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
                   onChange={(e) => setSelectedRoleFilter(e.target.value)}
                   className="w-full px-3 py-2 text-xs rounded-xl border border-gray-200 focus:outline-[#1E5AA8] bg-white font-bold text-[#1A3A5F]"
                 >
-                  <option value="ALL">جميع الأدوار (الكل: طلاب + معلمين + مدراء) ({codesList.length})</option>
+                  <option value="ALL">جميع الأدوار (الكل: طلاب + معلمين + مشرفين + مدراء) ({codesList.length})</option>
                   <option value="student">الطلاب فقط ({codesList.filter(c => c.role === 'student').length})</option>
                   <option value="teacher">المعلمون فقط ({codesList.filter(c => c.role === 'teacher').length})</option>
+                  <option value="supervisor">المشرفون فقط ({codesList.filter(c => c.role === 'supervisor').length})</option>
                   <option value="principal">المدراء فقط ({codesList.filter(c => c.role === 'principal').length})</option>
                 </select>
               </div>
@@ -1107,10 +1112,12 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
                                 ? 'bg-emerald-100 text-emerald-800'
                                 : c.role === 'teacher'
                                 ? 'bg-blue-100 text-blue-800'
+                                : c.role === 'supervisor'
+                                ? 'bg-indigo-100 text-indigo-800'
                                 : 'bg-purple-100 text-purple-800'
                             }`}
                           >
-                            {c.roleTitleAr || (c.role === 'student' ? 'طالب' : c.role === 'teacher' ? 'معلم' : 'مدير')}
+                            {c.roleTitleAr || (c.role === 'student' ? 'طالب' : c.role === 'teacher' ? 'معلم' : c.role === 'supervisor' ? 'مشرف' : 'مدير')}
                           </span>
                         </td>
                         <td className="p-3 font-semibold text-gray-900">
@@ -1121,6 +1128,8 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
                         <td className="p-3 text-gray-600">
                           {c.role === 'principal' || c.code.startsWith('M-') ? (
                             <span className="font-bold text-[#1E5AA8]">مدير المدرسة - كل الصفوف</span>
+                          ) : c.role === 'supervisor' || c.code.startsWith('SUP-') ? (
+                            <span className="font-bold text-indigo-700">مشرف المدرسة - كل الصفوف</span>
                           ) : (
                             <>
                               {c.grade ? `الصف ${c.grade}` : ''}
@@ -1211,6 +1220,7 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
                 className="w-full p-2.5 text-xs rounded-xl border border-gray-300 focus:outline-[#1E5AA8]"
               >
                 <option value="teacher">معلم مادة (Teacher T-)</option>
+                <option value="supervisor">مشرف مدرسي (Supervisor SUP-)</option>
                 <option value="principal">مدير مدرسة (Principal M-)</option>
                 <option value="student">طالب مدرسي (Student STU-)</option>
               </select>
@@ -1325,7 +1335,7 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
               استيراد كشوفات الطلاب والمعلمين عبر ملف Excel / CSV
             </h3>
             <p className="text-xs text-gray-500 mt-1">
-              متوافق مع ترتيب الأعمدة: <strong>A = schoolId | B = grade | C = name | D = type (S/T/M) | E = subject</strong>
+              متوافق مع ترتيب الأعمدة: <strong>A = schoolId | B = grade | C = name | D = type (S/T/M/SUP/مشرف) | E = subject</strong>
               <br />
               يتم تجاوز السطر 1 (العنوان) والسطر 2 (رؤوس الأعمدة)، وقراءة جميع الأسطر ابتداءً من السطر 3 حتى آخر الملف.
             </p>
@@ -1399,14 +1409,24 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
                     }
 
                     // Rule 3: Account type conversion
-                    // S = طالب
-                    // T = معلم
-                    // M = مدير
+                    // SUP / مشرف = مشرف
+                    // T / معلم = معلم
+                    // M / مدير = مدير
+                    // S / طالب = طالب
                     const typeUpper = rawType.toUpperCase();
                     let role: UserRole = 'student';
                     let roleLabelAr = 'طالب';
 
-                    if (typeUpper.startsWith('T') || typeUpper.includes('معلم') || typeUpper.includes('TEACHER')) {
+                    if (
+                      typeUpper === 'SUP' ||
+                      typeUpper.startsWith('SUP') ||
+                      typeUpper.includes('SUPERVISOR') ||
+                      rawType.includes('مشرف') ||
+                      rawType.includes('إشراف')
+                    ) {
+                      role = 'supervisor';
+                      roleLabelAr = 'مشرف';
+                    } else if (typeUpper.startsWith('T') || typeUpper.includes('معلم') || typeUpper.includes('TEACHER')) {
                       role = 'teacher';
                       roleLabelAr = 'معلم';
                     } else if (typeUpper.startsWith('M') || typeUpper.includes('مدير') || typeUpper.includes('PRINCIPAL') || typeUpper.includes('MANAGER')) {
@@ -1510,6 +1530,8 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
                       previewCode = subCode
                         ? `T-${cleanGrade || '8'}-${subCode}-${schoolPrefix}-${rnd}`
                         : `T-${cleanGrade || '8'}-${schoolPrefix}-${rnd}`;
+                    } else if (role === 'supervisor') {
+                      previewCode = `SUP-${schoolPrefix}-${rnd}`;
                     } else {
                       previewCode = `M-${schoolPrefix}-${rnd}`;
                     }
@@ -1573,7 +1595,7 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
           {parsedExcelRecords.length > 0 && (
             <div className="space-y-4 pt-2">
               {/* Summary Stats Badges */}
-              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 text-center">
+              <div className="grid grid-cols-2 sm:grid-cols-6 gap-2 text-center">
                 <div className="p-3 bg-blue-50 border border-blue-200 rounded-xl">
                   <span className="text-[11px] text-gray-500 font-bold block">إجمالي الأسماء</span>
                   <span className="text-lg font-black text-[#1E5AA8]">{parsedExcelRecords.length}</span>
@@ -1588,6 +1610,12 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
                   <span className="text-[11px] text-gray-500 font-bold block">المعلمون (T)</span>
                   <span className="text-lg font-black text-emerald-700">
                     {parsedExcelRecords.filter((r) => r.role === 'teacher').length}
+                  </span>
+                </div>
+                <div className="p-3 bg-indigo-50 border border-indigo-200 rounded-xl">
+                  <span className="text-[11px] text-gray-500 font-bold block">المشرفون (SUP)</span>
+                  <span className="text-lg font-black text-indigo-700">
+                    {parsedExcelRecords.filter((r) => r.role === 'supervisor').length}
                   </span>
                 </div>
                 <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl">
@@ -1643,14 +1671,16 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
                                   ? 'bg-sky-100 text-sky-800 border border-sky-200'
                                   : r.role === 'teacher'
                                   ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                                  : r.role === 'supervisor'
+                                  ? 'bg-indigo-100 text-indigo-800 border border-indigo-200'
                                   : 'bg-amber-100 text-amber-800 border border-amber-200'
                               }`}
                             >
                               {r.roleLabelAr} ({r.rawType})
                             </span>
                           </td>
-                          <td className="p-2 text-center font-bold">{r.role === 'principal' ? 'كل الصفوف' : (r.grade ? `صف ${r.grade}` : '-')}</td>
-                          <td className="p-2">{r.role === 'principal' ? 'مدير المدرسة - كل الصفوف' : (r.subject || '-')}</td>
+                          <td className="p-2 text-center font-bold">{r.role === 'principal' || r.role === 'supervisor' ? 'كل الصفوف' : (r.grade ? `صف ${r.grade}` : '-')}</td>
+                          <td className="p-2">{r.role === 'principal' ? 'مدير المدرسة - كل الصفوف' : r.role === 'supervisor' ? 'مشرف المدرسة' : (r.subject || '-')}</td>
                           <td className="p-2">
                             <span className="text-[11px] font-bold text-[#1E5AA8]">{r.schoolName}</span>
                           </td>
@@ -1704,14 +1734,16 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
                               ? r.subject
                                 ? `معلم ${r.subject} صف ${r.grade}`
                                 : `معلم صف ${r.grade}`
+                              : r.role === 'supervisor'
+                              ? 'مشرف'
                               : r.role === 'principal'
                               ? 'مدير مدرسة'
                               : `طالب صف ${r.grade}`,
                           assignedToName: r.role === 'principal' ? r.name.replace(/صف\s*8|الصف\s*8/gi, '').trim() : r.name,
                           schoolId: finalSchoolId,
                           schoolName: finalSchoolName,
-                          grade: r.role === 'principal' ? undefined : (r.grade as any),
-                          subject: r.role === 'principal' ? undefined : (r.subject || undefined),
+                          grade: r.role === 'principal' || r.role === 'supervisor' ? undefined : (r.grade as any),
+                          subject: r.role === 'principal' || r.role === 'supervisor' ? undefined : (r.subject || undefined),
                           isTest: false,
                           createdAt: new Date().toISOString(),
                           isActivated: false,

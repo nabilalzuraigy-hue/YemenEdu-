@@ -50,10 +50,12 @@ import {
   isQuestionArchivedForStudentWeek,
   getHomeworkArchiveCutoffInfo,
   TeacherRecommendation,
+  ClassSchedule,
 } from '../services/appData';
 import { UnifiedSidebar, StudentArchiveSection } from '../components/UnifiedSidebar';
 import { StudentArchiveModal } from '../components/StudentArchiveModal';
 import { StudentAccountModal } from '../components/StudentAccountModal';
+import { ScheduleGridView } from '../components/ScheduleGridView';
 import { playGentleNotificationSound, unlockNotificationAudio } from '../services/soundUtils';
 import { formatArabicSchoolName, getSchoolPrincipalName, isGenericPrincipalSender, isSimulationAnnouncement } from '../utils/schoolDisplay';
 
@@ -116,8 +118,15 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
   };
   const gradeLabel = getGradeTitle(studentGrade);
 
-  // 5 Bottom Tabs: 'home' (المنهج) | 'homework' (واجباتي) | 'announcements' (التعاميم) | 'grades' (درجاتي) | 'recommendations' (توصيات المعلم)
-  const [navTab, setNavTab] = useState<'home' | 'homework' | 'announcements' | 'grades' | 'recommendations' | 'account'>('home');
+  // 5 Bottom Tabs: 'home' (المنهج) | 'homework' (واجباتي) | 'announcements' (التعاميم) | 'grades' (درجاتي) | 'recommendations' (توصيات المعلم) + 'schedule' view
+  const [navTab, setNavTab] = useState<'home' | 'homework' | 'announcements' | 'grades' | 'recommendations' | 'account' | 'schedule'>('home');
+  const [approvedGradeSchedules, setApprovedGradeSchedules] = useState<ClassSchedule[]>(() =>
+    session.schoolId
+      ? appDataService
+          .getClassSchedules(session.schoolId)
+          .filter((s) => s.isApproved && String(s.grade).trim() === String(studentGrade).trim())
+      : []
+  );
 
   // Left Sidebar & Modal States
   const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(false);
@@ -635,6 +644,41 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
       }
     } catch (_) {}
 
+    // 8. Direct Firestore query: Approved Fixed Term 1 Weekly Schedule (STRICTLY isolated to studentGrade)
+    let unsubSchedules = () => {};
+    try {
+      if (currentUser?.schoolId) {
+        const normalizedSchool = currentUser.schoolId.trim().toLowerCase();
+        const targetGrade = String(studentGrade).trim();
+        const qSched = query(
+          collection(db, 'class_schedules'),
+          where('schoolId', '==', currentUser.schoolId),
+          where('isApproved', '==', true)
+        );
+        unsubSchedules = onSnapshot(
+          qSched,
+          (snap) => {
+            const list = snap.docs
+              .map((d) => ({ ...d.data(), id: d.id } as ClassSchedule))
+              .filter(
+                (s) =>
+                  (s.schoolId || '').trim().toLowerCase() === normalizedSchool &&
+                  s.isApproved === true &&
+                  String(s.grade).trim() === targetGrade
+              );
+            setApprovedGradeSchedules(list);
+          },
+          () => {
+            setApprovedGradeSchedules(
+              appDataService
+                .getClassSchedules(currentUser.schoolId)
+                .filter((s) => s.isApproved && String(s.grade).trim() === targetGrade)
+            );
+          }
+        );
+      }
+    } catch (_) {}
+
     return () => {
       unsubAppData();
       unsubQuestions();
@@ -643,6 +687,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
       unsubSubmissions();
       unsubGb();
       unsubHwArchive();
+      unsubSchedules();
     };
   }, [studentGrade, studentClass, session.schoolId, session.code]);
 
@@ -1159,6 +1204,38 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
                 </div>
               </div>
             )}
+
+            {/* بطاقة جدول الحصص الأسبوعي الثابت للترم الأول (معزول تماماً لصف الطالب فقط) */}
+            <button
+              type="button"
+              onClick={() => setNavTab('schedule')}
+              className="w-full bg-white rounded-2xl p-4 sm:p-5 border border-[#DCE7F3] hover:border-[#9BBEDF] shadow-xs hover:bg-[#F4F8FD] transition flex items-center justify-between gap-4 cursor-pointer text-right"
+            >
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="p-2.5 rounded-xl bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] shrink-0">
+                  <Calendar className="w-5 h-5" />
+                </div>
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="font-black text-sm sm:text-base text-[#1A3A5F]">
+                      جدول الحصص الأسبوعي — الترم الأول
+                    </h3>
+                    <span className="px-2 py-0.5 rounded-full bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] text-[10px] font-black">
+                      {gradeLabel}
+                    </span>
+                  </div>
+                  <p className="text-xs text-[#5C7085] font-semibold mt-0.5">
+                    {approvedGradeSchedules.length > 0
+                      ? `الجدول المعتمد والثابت لصفك (${approvedGradeSchedules.length} فصل معتمد)`
+                      : 'اضغط لعرض جدول حصص صفك فور اعتماده من مدير المدرسة'}
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-1 text-xs font-black text-[#1F5AAA] shrink-0">
+                <span>عرض الجدول</span>
+                <ChevronLeft className="w-4 h-4" />
+              </div>
+            </button>
 
             {/* 7 Yemeni Curriculum Subjects */}
             <div>
@@ -2168,6 +2245,57 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
             })()}
           </div>
         )}
+
+        {/* TAB: STUDENT FIXED TERM 1 SCHEDULE (Strictly isolated to studentGrade) */}
+        {navTab === 'schedule' && (
+          <div className="space-y-4">
+            <div className="bg-white rounded-2xl p-4 sm:p-5 border border-[#DCE7F3] shadow-sm flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="font-black text-base sm:text-lg text-[#1A3A5F] flex items-center gap-2">
+                  <Calendar className="w-5 h-5 text-[#1F5AAA] shrink-0" />
+                  <span>جدول الحصص الأسبوعي — {gradeLabel} (الترم الأول)</span>
+                </h2>
+                <p className="text-xs text-[#5C7085] font-semibold mt-0.5">
+                  جدول ثابت ومعتمد طوال الترم الأول (السبت – الأربعاء • الحصة الأولى – السادسة)
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setNavTab('home')}
+                className="px-3.5 py-2 rounded-xl bg-[#EEF5FC] hover:bg-[#DCEAF9] text-[#1F5AAA] border border-[#C6DCF2] text-xs font-black cursor-pointer transition"
+              >
+                العودة للمنهج
+              </button>
+            </div>
+
+            {approvedGradeSchedules.length === 0 ? (
+              <div className="bg-white rounded-2xl p-8 border border-[#DCE7F3] text-center space-y-2 shadow-sm">
+                <Calendar className="w-10 h-10 text-[#9BBEDF] mx-auto" />
+                <h3 className="font-black text-sm text-[#1A3A5F]">
+                  لم يتم اعتماد جدول حصص {gradeLabel} بعد
+                </h3>
+                <p className="text-xs text-[#5C7085] font-semibold max-w-md mx-auto leading-relaxed">
+                  عند رفع المشرف لجدول صفك واعتماده من مدير المدرسة سيظهر هنا مباشرة بشكل ثابت للترم الأول.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {approvedGradeSchedules.map((sch) => (
+                  <div
+                    key={sch.id}
+                    className="bg-white rounded-2xl p-4 sm:p-5 border border-[#DCE7F3] shadow-sm"
+                  >
+                    <ScheduleGridView
+                      entries={sch.entries}
+                      title={`${sch.gradeLabel} — فصل ${sch.classNumber}`}
+                      subtitle={`الترم ${sch.term} • معتمد من مدير المدرسة: ${sch.approvedBy || 'الإدارة المدرسية'}`}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Floating Bottom Navigation Bar: Clean Crisp White matching Reference Screenshot */}
@@ -2490,11 +2618,14 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
         isOpen={isSidebarOpen}
         onClose={() => setIsSidebarOpen(false)}
         session={session}
-        activeView={activeArchiveModal || 'dashboard'}
+        activeView={navTab === 'schedule' ? 'schedule' : (activeArchiveModal || 'dashboard')}
         onSelectView={(v: string) => {
           if (v === 'dashboard') {
             setActiveArchiveModal(null);
             setNavTab('home');
+          } else if (v === 'schedule') {
+            setActiveArchiveModal(null);
+            setNavTab('schedule');
           } else {
             setActiveArchiveModal(v as StudentArchiveSection);
           }

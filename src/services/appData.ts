@@ -496,6 +496,130 @@ export interface GradeRecord {
   date?: string;
 }
 
+export type AttendanceStatus = 'حاضر' | 'غائب' | 'متأخر';
+
+export interface AttendanceEntry {
+  studentName: string;
+  status: AttendanceStatus;
+  note?: string;
+}
+
+export interface AttendanceRecord {
+  id: string;
+  schoolId: string;
+  grade: string;
+  gradeLabel: string;
+  classNumber: string;
+  date: string; // YYYY-MM-DD
+  entries: AttendanceEntry[];
+  presentCount: number;
+  absentCount: number;
+  lateCount: number;
+  recordedBy: string;
+  supervisorCode?: string;
+  isDirectSaved: boolean;
+  createdAt: number;
+  createdAtFormatted: string;
+}
+
+export type ScheduleDay = 'السبت' | 'الأحد' | 'الاثنين' | 'الثلاثاء' | 'الأربعاء';
+
+export const SCHEDULE_DAYS: ScheduleDay[] = ['السبت', 'الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء'];
+
+export const SCHEDULE_PERIODS: Array<{ period: number; label: string }> = [
+  { period: 1, label: 'الأولى' },
+  { period: 2, label: 'الثانية' },
+  { period: 3, label: 'الثالثة' },
+  { period: 4, label: 'الرابعة' },
+  { period: 5, label: 'الخامسة' },
+  { period: 6, label: 'السادسة' },
+];
+
+export const GRADE_OPTIONS_12: Array<{ id: string; label: string }> = [
+  { id: '1', label: 'الصف الأول' },
+  { id: '2', label: 'الصف الثاني' },
+  { id: '3', label: 'الصف الثالث' },
+  { id: '4', label: 'الصف الرابع' },
+  { id: '5', label: 'الصف الخامس' },
+  { id: '6', label: 'الصف السادس' },
+  { id: '7', label: 'الصف السابع' },
+  { id: '8', label: 'الصف الثامن' },
+  { id: '9', label: 'الصف التاسع' },
+  { id: '10', label: 'الصف العاشر' },
+  { id: '11', label: 'الصف الحادي عشر' },
+  { id: '12', label: 'الصف الثاني عشر' },
+];
+
+export function getGradeLabelAr(grade: string): string {
+  const clean = String(grade || '').trim();
+  const found = GRADE_OPTIONS_12.find((g) => g.id === clean);
+  return found ? found.label : clean ? `الصف ${clean}` : 'غير محدد';
+}
+
+export interface ScheduleSlot {
+  day: ScheduleDay;
+  period: number;
+  periodLabel: string;
+  subject: string;
+  teacherName: string;
+}
+
+export interface ClassSchedule {
+  id: string;
+  schoolId: string;
+  grade: string;
+  gradeLabel: string;
+  classNumber: string;
+  term: 'الأول';
+  entries: ScheduleSlot[];
+  uploadedBy: string;
+  supervisorCode?: string;
+  sourceMethod: 'image' | 'manual';
+  uploadedAt: number;
+  uploadedAtFormatted: string;
+  isApproved: boolean;
+  approvalStatus: 'pending' | 'approved' | 'rejected';
+  approvedBy?: string;
+  approvedAt?: number;
+  approvedAtFormatted?: string;
+  rejectionNote?: string;
+  pendingEntries?: ScheduleSlot[];
+  pendingUploadedBy?: string;
+  pendingUploadedAt?: number;
+  pendingUploadedAtFormatted?: string;
+  pendingSourceMethod?: 'image' | 'manual';
+  hasPendingUpdate?: boolean;
+}
+
+export type SupervisorActivityCategory =
+  | 'تقرير'
+  | 'فعالية'
+  | 'نشاط رياضي'
+  | 'نشاط ثقافي'
+  | 'رحلة مدرسية';
+
+export const SUPERVISOR_ACTIVITY_CATEGORIES: SupervisorActivityCategory[] = [
+  'تقرير',
+  'فعالية',
+  'نشاط رياضي',
+  'نشاط ثقافي',
+  'رحلة مدرسية',
+];
+
+export interface SupervisorActivity {
+  id: string;
+  schoolId: string;
+  category: SupervisorActivityCategory;
+  title: string;
+  details: string;
+  targetGrade?: string;
+  activityDate: string;
+  createdBy: string;
+  supervisorCode?: string;
+  createdAt: number;
+  createdAtFormatted: string;
+}
+
 const DEFAULT_TEXTBOOKS: Textbook[] = [];
 
 const DEFAULT_ANNOUNCEMENTS: Announcement[] = [];
@@ -618,6 +742,9 @@ class AppDataService {
   private submissions: HomeworkSubmission[] = DEFAULT_SUBMISSIONS;
   private grades: GradeRecord[] = [];
   private recommendations: TeacherRecommendation[] = [];
+  private attendanceRecords: AttendanceRecord[] = [];
+  private classSchedules: ClassSchedule[] = [];
+  private supervisorActivities: SupervisorActivity[] = [];
   private listeners: Array<() => void> = [];
 
   constructor() {
@@ -787,6 +914,42 @@ class AppDataService {
           this.recommendations = snap.empty
             ? []
             : snap.docs.map((d) => ({ ...d.data(), id: d.id } as TeacherRecommendation));
+          this.notify();
+        },
+        () => {}
+      );
+
+      // 8. Supervisor Attendance Records
+      onSnapshot(
+        collection(db, 'attendance_records'),
+        (snap) => {
+          this.attendanceRecords = snap.empty
+            ? []
+            : snap.docs.map((d) => ({ ...d.data(), id: d.id } as AttendanceRecord));
+          this.notify();
+        },
+        () => {}
+      );
+
+      // 9. Class Schedules (Fixed Term 1)
+      onSnapshot(
+        collection(db, 'class_schedules'),
+        (snap) => {
+          this.classSchedules = snap.empty
+            ? []
+            : snap.docs.map((d) => ({ ...d.data(), id: d.id } as ClassSchedule));
+          this.notify();
+        },
+        () => {}
+      );
+
+      // 10. Supervisor Activities & Reports
+      onSnapshot(
+        collection(db, 'supervisor_activities'),
+        (snap) => {
+          this.supervisorActivities = snap.empty
+            ? []
+            : snap.docs.map((d) => ({ ...d.data(), id: d.id } as SupervisorActivity));
           this.notify();
         },
         () => {}
@@ -2017,6 +2180,344 @@ class AppDataService {
     }
   }
 
+  // --- Supervisor Activities & Reports ---
+  public getSupervisorActivities(schoolId?: string): SupervisorActivity[] {
+    if (!schoolId || !schoolId.trim()) return [];
+    const normalizedSchoolId = schoolId.trim().toLowerCase();
+    return this.supervisorActivities
+      .filter((a) => (a.schoolId || '').trim().toLowerCase() === normalizedSchoolId)
+      .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  }
+
+  public async addSupervisorActivity(
+    activity: Omit<SupervisorActivity, 'id' | 'createdAt' | 'createdAtFormatted'>
+  ): Promise<SupervisorActivity> {
+    await ensureAuthReady();
+    const now = Date.now();
+    const newAct: SupervisorActivity = cleanFirestorePayload({
+      ...activity,
+      id: `sact_${now}_${Math.random().toString(36).substring(2, 7)}`,
+      createdAt: now,
+      createdAtFormatted: formatArabicDateTime(new Date(now)),
+    });
+    try {
+      await setDoc(doc(db, 'supervisor_activities', newAct.id), newAct);
+      this.supervisorActivities = [newAct, ...this.supervisorActivities.filter((a) => a.id !== newAct.id)];
+      this.notify();
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, `supervisor_activities/${newAct.id}`);
+    }
+    return newAct;
+  }
+
+  public async deleteSupervisorActivity(id: string): Promise<void> {
+    await ensureAuthReady();
+    try {
+      await deleteDoc(doc(db, 'supervisor_activities', id));
+      this.supervisorActivities = this.supervisorActivities.filter((a) => a.id !== id);
+      this.notify();
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, `supervisor_activities/${id}`);
+    }
+  }
+
+  // --- Supervisor Attendance & Absence (Direct save, max 1 record per class per day) ---
+  public getAttendanceRecords(schoolId?: string): AttendanceRecord[] {
+    if (!schoolId || !schoolId.trim()) return [];
+    const normalizedSchoolId = schoolId.trim().toLowerCase();
+    return this.attendanceRecords
+      .filter((r) => (r.schoolId || '').trim().toLowerCase() === normalizedSchoolId)
+      .sort((a, b) => (b.date || '').localeCompare(a.date || '') || (b.createdAt || 0) - (a.createdAt || 0));
+  }
+
+  private buildAttendanceDocId(schoolId: string, grade: string, classNumber: string, date: string): string {
+    const cleanSchool = (schoolId || 'school').trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+    const cleanGrade = (grade || '1').trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+    const rawClass = (classNumber || '1').trim() || '1';
+    const encodedClass = encodeURIComponent(rawClass).replace(/%/g, '_');
+    const cleanDate = (date || '').trim().replace(/[^0-9-]/g, '');
+    return `att_${cleanSchool}_${cleanGrade}_${encodedClass}_${cleanDate}`;
+  }
+
+  public hasAttendanceForClassDate(schoolId: string, grade: string, classNumber: string, date: string): boolean {
+    const targetId = this.buildAttendanceDocId(schoolId, grade, classNumber, date);
+    return this.attendanceRecords.some(
+      (r) =>
+        r.id === targetId ||
+        ((r.schoolId || '').trim().toLowerCase() === (schoolId || '').trim().toLowerCase() &&
+          String(r.grade).trim() === String(grade).trim() &&
+          (r.classNumber || '1').trim() === (classNumber || '1').trim() &&
+          r.date === date)
+    );
+  }
+
+  public async saveAttendanceRecordOnce(input: {
+    schoolId: string;
+    grade: string;
+    classNumber: string;
+    date: string;
+    entries: AttendanceEntry[];
+    recordedBy: string;
+    supervisorCode?: string;
+  }): Promise<AttendanceRecord> {
+    await ensureAuthReady();
+    const classNum = (input.classNumber || '1').trim() || '1';
+    const docId = this.buildAttendanceDocId(input.schoolId, input.grade, classNum, input.date);
+
+    // Strictly prevent duplicate attendance on the same day for the same class/section
+    if (this.hasAttendanceForClassDate(input.schoolId, input.grade, classNum, input.date)) {
+      throw new Error(`تم تسجيل حضور وغياب هذا الفصل لتاريخ (${input.date}) مسبقاً، ولا يمكن التسجيل مرتين لنفس الفصل في نفس اليوم.`);
+    }
+
+    try {
+      const existingSnap = await getDoc(doc(db, 'attendance_records', docId));
+      if (existingSnap.exists()) {
+        throw new Error(`تم تسجيل حضور وغياب هذا الفصل لتاريخ (${input.date}) مسبقاً، ولا يمكن التسجيل مرتين لنفس الفصل في نفس اليوم.`);
+      }
+    } catch (err: any) {
+      if (err?.message?.includes('مسبقاً')) throw err;
+    }
+
+    const cleanEntries = input.entries
+      .map((e) => ({
+        studentName: (e.studentName || '').trim(),
+        status: (['حاضر', 'غائب', 'متأخر'].includes(e.status) ? e.status : 'حاضر') as AttendanceStatus,
+        note: e.note?.trim() || undefined,
+      }))
+      .filter((e) => e.studentName.length > 0);
+
+    if (cleanEntries.length === 0) {
+      throw new Error('يرجى التأكد من وجود اسم طالب واحد على الأقل قبل الحفظ.');
+    }
+
+    const presentCount = cleanEntries.filter((e) => e.status === 'حاضر').length;
+    const absentCount = cleanEntries.filter((e) => e.status === 'غائب').length;
+    const lateCount = cleanEntries.filter((e) => e.status === 'متأخر').length;
+    const now = Date.now();
+
+    const record: AttendanceRecord = cleanFirestorePayload({
+      id: docId,
+      schoolId: input.schoolId,
+      grade: String(input.grade).trim(),
+      gradeLabel: getGradeLabelAr(String(input.grade).trim()),
+      classNumber: classNum,
+      date: input.date,
+      entries: cleanEntries.map((ce) => cleanFirestorePayload(ce)),
+      presentCount,
+      absentCount,
+      lateCount,
+      recordedBy: input.recordedBy,
+      supervisorCode: input.supervisorCode,
+      isDirectSaved: true,
+      createdAt: now,
+      createdAtFormatted: formatArabicDateTime(new Date(now)),
+    });
+
+    try {
+      await setDoc(doc(db, 'attendance_records', docId), record);
+      this.attendanceRecords = [record, ...this.attendanceRecords.filter((r) => r.id !== docId)];
+      this.notify();
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, `attendance_records/${docId}`);
+    }
+    return record;
+  }
+
+  // --- Weekly Class Schedules (Fixed Term 1, Supervisor Uploads -> Principal Approves Once) ---
+  public getClassSchedules(schoolId?: string): ClassSchedule[] {
+    if (!schoolId || !schoolId.trim()) return [];
+    const normalizedSchoolId = schoolId.trim().toLowerCase();
+    return this.classSchedules
+      .filter((s) => (s.schoolId || '').trim().toLowerCase() === normalizedSchoolId)
+      .sort((a, b) => Number(a.grade) - Number(b.grade) || (b.uploadedAt || 0) - (a.uploadedAt || 0));
+  }
+
+  private buildScheduleDocId(schoolId: string, grade: string, classNumber: string): string {
+    const cleanSchool = (schoolId || 'school').trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+    const cleanGrade = (grade || '1').trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+    const rawClass = (classNumber || '1').trim() || '1';
+    const encodedClass = encodeURIComponent(rawClass).replace(/%/g, '_');
+    return `sched_${cleanSchool}_t1_${cleanGrade}_${encodedClass}`;
+  }
+
+  public async submitClassScheduleForApproval(input: {
+    schoolId: string;
+    grade: string;
+    classNumber: string;
+    entries: ScheduleSlot[];
+    uploadedBy: string;
+    supervisorCode?: string;
+    sourceMethod: 'image' | 'manual';
+  }): Promise<ClassSchedule> {
+    await ensureAuthReady();
+    const classNum = (input.classNumber || '1').trim() || '1';
+    const docId = this.buildScheduleDocId(input.schoolId, input.grade, classNum);
+    const now = Date.now();
+    const nowFormatted = formatArabicDateTime(new Date(now));
+
+    const cleanEntries = input.entries
+      .filter((slot) => (slot.subject || '').trim().length > 0 || (slot.teacherName || '').trim().length > 0)
+      .map((slot) =>
+        cleanFirestorePayload({
+          day: slot.day,
+          period: Number(slot.period),
+          periodLabel: slot.periodLabel || SCHEDULE_PERIODS.find((p) => p.period === Number(slot.period))?.label || `الحصة ${slot.period}`,
+          subject: (slot.subject || '').trim(),
+          teacherName: (slot.teacherName || '').trim(),
+        })
+      );
+
+    if (cleanEntries.length === 0) {
+      throw new Error('يرجى إدخال حصة واحدة على الأقل في الجدول قبل الإرسال للاعتماد.');
+    }
+
+    let existingDoc: ClassSchedule | null =
+      this.classSchedules.find((s) => s.id === docId) || null;
+    if (!existingDoc) {
+      try {
+        const snap = await getDoc(doc(db, 'class_schedules', docId));
+        if (snap.exists()) existingDoc = snap.data() as ClassSchedule;
+      } catch {}
+    }
+
+    // If an approved schedule already exists, keep it live & fixed until Principal approves the newly uploaded version!
+    let nextRecord: ClassSchedule;
+    if (existingDoc && existingDoc.isApproved) {
+      nextRecord = cleanFirestorePayload({
+        ...existingDoc,
+        id: docId,
+        grade: String(input.grade).trim(),
+        gradeLabel: getGradeLabelAr(String(input.grade).trim()),
+        classNumber: classNum,
+        term: 'الأول',
+        pendingEntries: cleanEntries,
+        pendingUploadedBy: input.uploadedBy,
+        pendingUploadedAt: now,
+        pendingUploadedAtFormatted: nowFormatted,
+        pendingSourceMethod: input.sourceMethod,
+        hasPendingUpdate: true,
+        rejectionNote: undefined,
+      });
+    } else {
+      nextRecord = cleanFirestorePayload({
+        id: docId,
+        schoolId: input.schoolId,
+        grade: String(input.grade).trim(),
+        gradeLabel: getGradeLabelAr(String(input.grade).trim()),
+        classNumber: classNum,
+        term: 'الأول',
+        entries: cleanEntries,
+        uploadedBy: input.uploadedBy,
+        supervisorCode: input.supervisorCode,
+        sourceMethod: input.sourceMethod,
+        uploadedAt: now,
+        uploadedAtFormatted: nowFormatted,
+        isApproved: false,
+        approvalStatus: 'pending',
+        hasPendingUpdate: false,
+      });
+    }
+
+    try {
+      await setDoc(doc(db, 'class_schedules', docId), nextRecord);
+      this.classSchedules = [nextRecord, ...this.classSchedules.filter((s) => s.id !== docId)];
+      this.notify();
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, `class_schedules/${docId}`);
+    }
+    return nextRecord;
+  }
+
+  public async approveClassSchedule(scheduleId: string, principalName: string): Promise<void> {
+    await ensureAuthReady();
+    let existing = this.classSchedules.find((s) => s.id === scheduleId) || null;
+    if (!existing) {
+      const snap = await getDoc(doc(db, 'class_schedules', scheduleId));
+      if (snap.exists()) existing = snap.data() as ClassSchedule;
+    }
+    if (!existing) throw new Error('لم يتم العثور على الجدول المطلوب.');
+
+    const now = Date.now();
+    const nowFormatted = formatArabicDateTime(new Date(now));
+
+    const updated: ClassSchedule = cleanFirestorePayload({
+      id: existing.id,
+      schoolId: existing.schoolId,
+      grade: existing.grade,
+      gradeLabel: existing.gradeLabel,
+      classNumber: existing.classNumber,
+      term: 'الأول',
+      entries: existing.hasPendingUpdate && existing.pendingEntries?.length ? existing.pendingEntries : existing.entries,
+      uploadedBy: existing.hasPendingUpdate && existing.pendingUploadedBy ? existing.pendingUploadedBy : existing.uploadedBy,
+      supervisorCode: existing.supervisorCode,
+      sourceMethod: existing.hasPendingUpdate && existing.pendingSourceMethod ? existing.pendingSourceMethod : existing.sourceMethod,
+      uploadedAt: existing.hasPendingUpdate && existing.pendingUploadedAt ? existing.pendingUploadedAt : existing.uploadedAt,
+      uploadedAtFormatted: existing.hasPendingUpdate && existing.pendingUploadedAtFormatted ? existing.pendingUploadedAtFormatted : existing.uploadedAtFormatted,
+      isApproved: true,
+      approvalStatus: 'approved',
+      approvedBy: principalName || 'مدير المدرسة',
+      approvedAt: now,
+      approvedAtFormatted: nowFormatted,
+      hasPendingUpdate: false,
+    });
+
+    try {
+      await setDoc(doc(db, 'class_schedules', scheduleId), updated);
+      this.classSchedules = [updated, ...this.classSchedules.filter((s) => s.id !== scheduleId)];
+      this.notify();
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `class_schedules/${scheduleId}`);
+    }
+  }
+
+  public async rejectClassSchedule(scheduleId: string, principalName: string, note?: string): Promise<void> {
+    await ensureAuthReady();
+    let existing = this.classSchedules.find((s) => s.id === scheduleId) || null;
+    if (!existing) {
+      const snap = await getDoc(doc(db, 'class_schedules', scheduleId));
+      if (snap.exists()) existing = snap.data() as ClassSchedule;
+    }
+    if (!existing) throw new Error('لم يتم العثور على الجدول المطلوب.');
+
+    const updated: ClassSchedule = existing.isApproved && existing.hasPendingUpdate
+      ? cleanFirestorePayload({
+          id: existing.id,
+          schoolId: existing.schoolId,
+          grade: existing.grade,
+          gradeLabel: existing.gradeLabel,
+          classNumber: existing.classNumber,
+          term: 'الأول',
+          entries: existing.entries,
+          uploadedBy: existing.uploadedBy,
+          supervisorCode: existing.supervisorCode,
+          sourceMethod: existing.sourceMethod,
+          uploadedAt: existing.uploadedAt,
+          uploadedAtFormatted: existing.uploadedAtFormatted,
+          isApproved: true,
+          approvalStatus: 'approved',
+          approvedBy: existing.approvedBy,
+          approvedAt: existing.approvedAt,
+          approvedAtFormatted: existing.approvedAtFormatted,
+          hasPendingUpdate: false,
+          rejectionNote: note?.trim() || `تم رفض التعديل المقترح بواسطة ${principalName}`,
+        })
+      : cleanFirestorePayload({
+          ...existing,
+          isApproved: false,
+          approvalStatus: 'rejected',
+          hasPendingUpdate: false,
+          rejectionNote: note?.trim() || `تمت إعادة الجدول للمراجعة بواسطة ${principalName}`,
+        });
+
+    try {
+      await setDoc(doc(db, 'class_schedules', scheduleId), updated);
+      this.classSchedules = [updated, ...this.classSchedules.filter((s) => s.id !== scheduleId)];
+      this.notify();
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `class_schedules/${scheduleId}`);
+    }
+  }
+
   // --- Clean all simulation data from Firestore ---
   public async clearAllSimulationData(): Promise<void> {
     await handleFullWipe(false);
@@ -2096,6 +2597,9 @@ export async function handleFullWipe(autoReload: boolean = true): Promise<void> 
   await wipeCollectionHelper('submissions');
   await wipeCollectionHelper('grades');
   await wipeCollectionHelper('term_results');
+  await wipeCollectionHelper('attendance_records');
+  await wipeCollectionHelper('class_schedules');
+  await wipeCollectionHelper('supervisor_activities');
 
   // Clear local storage and caches (preserve active session & activation code)
   const savedSession = sessionStorage.getItem('yemen_edu_active_session');

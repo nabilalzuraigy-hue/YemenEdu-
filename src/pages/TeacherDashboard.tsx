@@ -27,7 +27,7 @@ import {
 } from 'lucide-react';
 import { collection, query, where, onSnapshot, addDoc, doc, serverTimestamp, setDoc } from 'firebase/firestore';
 import { db, auth } from '../firebase/config';
-import { UserSession, authService, cleanFirestorePayload } from '../services/authService';
+import { UserSession, authService, cleanFirestorePayload, normalizeArabicForMatch } from '../services/authService';
 import {
   appDataService,
   Question,
@@ -40,10 +40,12 @@ import {
   getCurrentAcademicMonth,
   MonthlyGradebookRecord,
   MonthlyGradebookStudent,
+  ClassSchedule,
 } from '../services/appData';
 import { playGentleNotificationSound } from '../services/soundUtils';
 import { GradeSheetPdfModal } from '../components/GradeSheetPdfModal';
 import { UnifiedSidebar } from '../components/UnifiedSidebar';
+import { ScheduleGridView, doesSlotMatchTeacher } from '../components/ScheduleGridView';
 import { TeacherRecommendationModal } from '../components/TeacherRecommendationModal';
 import { formatArabicSchoolName, getSchoolPrincipalName, isGenericPrincipalSender, isSimulationAnnouncement } from '../utils/schoolDisplay';
 
@@ -53,7 +55,10 @@ interface TeacherDashboardProps {
 
 export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) => {
   const currentUser = session;
-  const [activeTab, setActiveTab] = useState<'create_question' | 'gradebook' | 'announcements'>('create_question');
+  const [activeTab, setActiveTab] = useState<'create_question' | 'gradebook' | 'announcements' | 'schedule'>('create_question');
+  const [approvedSchoolSchedules, setApprovedSchoolSchedules] = useState<ClassSchedule[]>(() =>
+    session.schoolId ? appDataService.getClassSchedules(session.schoolId).filter((s) => s.isApproved) : []
+  );
   
   const teacherGrade = (session.grade as '7' | '8' | '9') || '8';
   const teacherClass = session.class || session.grade || '8';
@@ -120,11 +125,13 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
     return () => window.removeEventListener('toggle-sidebar', handleToggle);
   }, []);
 
-  const handleSelectSidebarView = (view: 'dashboard' | 'archive_questions' | 'archive_grades' | 'archive_circulars') => {
+  const handleSelectSidebarView = (view: 'dashboard' | 'schedule' | 'archive_questions' | 'archive_grades' | 'archive_circulars') => {
     setActiveSidebarView(view);
     if (view === 'dashboard') {
       setActiveTab('create_question');
       setSelectedMonthView('active');
+    } else if (view === 'schedule') {
+      setActiveTab('schedule');
     } else if (view === 'archive_questions') {
       setActiveTab('create_question');
       if (archivedGradebooks.length > 0) {
@@ -156,6 +163,9 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
       setRegisteredGrades(appDataService.getGrades(undefined, teacherSubject, teacherSchoolId, teacherGrade));
       setGradeSheetData(
         appDataService.getStudentGradeSheet(teacherGrade, teacherSchoolId, teacherSubject, allStudentCodes, rolloverTimestamp)
+      );
+      setApprovedSchoolSchedules(
+        appDataService.getClassSchedules(teacherSchoolId).filter((s) => s.isApproved)
       );
     };
 
@@ -470,6 +480,30 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
       );
     } catch (_) {}
 
+    // 6. Direct Firestore query: Approved Fixed Term 1 Weekly Class Schedules
+    let unsubSchedules = () => {};
+    try {
+      if (currentUser?.schoolId) {
+        const normalizedSchool = currentUser.schoolId.trim().toLowerCase();
+        const qSched = query(
+          collection(db, 'class_schedules'),
+          where('schoolId', '==', currentUser.schoolId),
+          where('isApproved', '==', true)
+        );
+        unsubSchedules = onSnapshot(
+          qSched,
+          (snap) => {
+            const list = snap.docs
+              .map((d) => ({ ...d.data(), id: d.id } as ClassSchedule))
+              .filter((s) => (s.schoolId || '').trim().toLowerCase() === normalizedSchool && s.isApproved)
+              .sort((a, b) => Number(a.grade) - Number(b.grade));
+            setApprovedSchoolSchedules(list);
+          },
+          () => {}
+        );
+      }
+    } catch (_) {}
+
     return () => {
       unsubData();
       unsubAuth();
@@ -478,8 +512,33 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
       unsubGrades();
       unsubSubs();
       unsubQuestions();
+      unsubSchedules();
     };
   }, [session.subject, session.schoolId, teacherClass, teacherGrade, teacherSchoolId, teacherSubject]);
+
+  // Strict Teacher Isolation: Teacher ONLY sees Term 1 schedules of classes/grades they actually teach
+  const teacherTaughtSchedules = approvedSchoolSchedules.filter((sch) => {
+    const entries = sch.entries || [];
+    const matchesByTeacherName = entries.some((slot) =>
+      slot.teacherName?.trim() ? doesSlotMatchTeacher(slot, session.name) : false
+    );
+    if (matchesByTeacherName) return true;
+
+    // Fallback when supervisor did not type teacher names in the teacher's assigned grade
+    if (String(sch.grade).trim() === String(teacherGrade).trim()) {
+      const normTeacherSubj = normalizeArabicForMatch(teacherSubject);
+      return entries.some((slot) => {
+        if (slot.teacherName?.trim()) return false;
+        const normSlotSubj = normalizeArabicForMatch(slot.subject || '');
+        return Boolean(
+          normTeacherSubj &&
+            normSlotSubj &&
+            (normSlotSubj.includes(normTeacherSubj) || normTeacherSubj.includes(normSlotSubj))
+        );
+      });
+    }
+    return false;
+  });
 
   const unreadCircularsCount = teacherCirculars.filter((c) => !c.isRead).length;
 
@@ -737,6 +796,26 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5 sm:gap-3">
+            {/* جدول الحصص الأسبوعي الثابت للترم الأول (للصفوف التي يدرسها المعلم فقط) */}
+            <button
+              type="button"
+              onClick={() => setActiveTab((prev) => (prev === 'schedule' ? 'create_question' : 'schedule'))}
+              className={`px-3.5 py-2.5 rounded-2xl border shadow-sm transition cursor-pointer flex items-center gap-2 text-xs font-black ${
+                activeTab === 'schedule'
+                  ? 'bg-[#1A3A5F] text-white border-[#1A3A5F]'
+                  : 'bg-white hover:bg-[#EEF5FC] text-[#1F5AAA] border-[#DCE7F3]'
+              }`}
+              title="جدول الحصص الأسبوعي (الترم الأول)"
+            >
+              <Calendar className="w-4 h-4 shrink-0" />
+              <span>جدول حصصي</span>
+              {teacherTaughtSchedules.length > 0 && (
+                <span className="px-1.5 py-0.5 rounded-full bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] text-[10px] font-black">
+                  {teacherTaughtSchedules.length}
+                </span>
+              )}
+            </button>
+
             {/* جرس التعاميم والتوجيهات */}
             <button
               type="button"
@@ -1433,6 +1512,60 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
               })
             )}
           </div>
+        </div>
+      )}
+
+      {/* TAB: FIXED TERM 1 WEEKLY SCHEDULE (Strictly classes taught by this teacher) */}
+      {activeTab === 'schedule' && (
+        <div className="space-y-4">
+          <div className="bg-white rounded-2xl p-4 sm:p-5 shadow-sm border border-[#DCE7F3] flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="font-black text-base text-[#1A3A5F] flex items-center gap-2">
+                <Calendar className="w-5 h-5 text-[#1F5AAA] shrink-0" />
+                <span>جدول الحصص الأسبوعي — الترم الأول (للصفوف التي تدرسها فقط)</span>
+              </h3>
+              <p className="text-xs text-[#5C7085] font-semibold mt-0.5">
+                جداول ثابتة ومعتمدة من مدير المدرسة (حصة أولى – سادسة | السبت – الأربعاء) • يتم تمييز حصصك تلقائياً
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setActiveTab('create_question')}
+              className="px-3.5 py-2 rounded-xl bg-[#EEF5FC] hover:bg-[#DCEAF9] text-[#1F5AAA] border border-[#C6DCF2] text-xs font-black flex items-center gap-1.5 cursor-pointer transition"
+            >
+              <ArrowRight className="w-4 h-4" />
+              <span>العودة لبنك الأسئلة</span>
+            </button>
+          </div>
+
+          {teacherTaughtSchedules.length === 0 ? (
+            <div className="bg-white rounded-2xl p-8 border border-[#DCE7F3] text-center space-y-2 shadow-sm">
+              <Calendar className="w-10 h-10 text-[#9BBEDF] mx-auto" />
+              <h4 className="font-black text-sm text-[#1A3A5F]">
+                لا يوجد جدول حصص معتمد للصفوف التي تدرسها حالياً
+              </h4>
+              <p className="text-xs text-[#5C7085] font-semibold max-w-md mx-auto leading-relaxed">
+                يرفع المشرف جدول الحصص الأسبوعي للترم الأول ويتم اعتماده من مدير المدرسة، وسيظهر هنا تلقائياً فور اعتماده (مع عزل جداول بقية الصفوف).
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {teacherTaughtSchedules.map((sch) => (
+                <div
+                  key={sch.id}
+                  className="bg-white rounded-2xl p-4 sm:p-5 border border-[#DCE7F3] shadow-sm"
+                >
+                  <ScheduleGridView
+                    entries={sch.entries}
+                    title={`${sch.gradeLabel} — فصل ${sch.classNumber}`}
+                    subtitle={`الترم ${sch.term} • رفعه المشرف: ${sch.uploadedBy} • اعتمده: ${sch.approvedBy || 'مدير المدرسة'}`}
+                    highlightTeacherName={session.name}
+                    highlightSubject={teacherSubject}
+                  />
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 

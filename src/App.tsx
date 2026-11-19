@@ -19,6 +19,7 @@ import { SystemAdminDashboard } from './pages/SystemAdminDashboard';
 import { PrincipalDashboard } from './pages/PrincipalDashboard';
 import { TeacherDashboard } from './pages/TeacherDashboard';
 import { StudentDashboard } from './pages/StudentDashboard';
+import { SupervisorDashboard } from './pages/SupervisorDashboard';
 import { PWAInstallBanner } from './components/PWAInstallBanner';
 import { formatArabicSchoolName } from './utils/schoolDisplay';
 
@@ -288,6 +289,10 @@ export default function App() {
 
             {session.role === 'teacher' && (
               <TeacherDashboard session={session} />
+            )}
+
+            {session.role === 'supervisor' && (
+              <SupervisorDashboard session={session} />
             )}
 
             {session.role === 'student' && (

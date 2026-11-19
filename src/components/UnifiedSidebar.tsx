@@ -32,6 +32,10 @@ export type StudentArchiveSection =
 
 export type UnifiedSidebarView =
   | 'dashboard'
+  | 'schedule'
+  | 'supervisor_activities'
+  | 'supervisor_attendance'
+  | 'supervisor_schedule'
   | 'archive_monthly'
   | 'archive_teacher_activities'
   | 'archive_cumulative'
@@ -95,6 +99,8 @@ export const UnifiedSidebar: React.FC<UnifiedSidebarProps> = ({
     switch (session.role) {
       case 'principal':
         return 'مدير المدرسة';
+      case 'supervisor':
+        return 'مشرف';
       case 'teacher':
         return 'معلم';
       case 'student':
@@ -108,6 +114,8 @@ export const UnifiedSidebar: React.FC<UnifiedSidebarProps> = ({
     switch (session.role) {
       case 'principal':
         return 'لوحة مدير المدرسة';
+      case 'supervisor':
+        return 'لوحة المشرف';
       case 'teacher':
         return 'لوحة المعلم';
       case 'student':
@@ -223,7 +231,78 @@ export const UnifiedSidebar: React.FC<UnifiedSidebarProps> = ({
                 <span className="truncate">{getMainDashboardLabel()}</span>
               </button>
 
+              {/* Schedule shortcut for Student & Teacher */}
+              {(session.role === 'student' || session.role === 'teacher') && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onSelectView('schedule');
+                    onClose();
+                  }}
+                  className={`w-full min-h-[44px] px-3 py-2.5 rounded-xl text-sm font-extrabold flex items-center gap-2.5 transition cursor-pointer ${
+                    activeView === 'schedule'
+                      ? 'bg-white/18 text-white border-r-4 border-white shadow-2xs'
+                      : 'text-white/95 hover:bg-white/10'
+                  }`}
+                >
+                  <CalendarCheck className="w-4 h-4 text-white/90 shrink-0" />
+                  <span className="truncate">جدول الحصص الأسبوعي (الترم الأول)</span>
+                </button>
+              )}
+
+              {/* Supervisor Quick Links */}
+              {session.role === 'supervisor' && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onSelectView('supervisor_activities');
+                      onClose();
+                    }}
+                    className={`w-full min-h-[44px] px-3 py-2.5 rounded-xl text-sm font-extrabold flex items-center gap-2.5 transition cursor-pointer ${
+                      activeView === 'supervisor_activities'
+                        ? 'bg-white/18 text-white border-r-4 border-white shadow-2xs'
+                        : 'text-white/95 hover:bg-white/10'
+                    }`}
+                  >
+                    <Activity className="w-4 h-4 text-white/90 shrink-0" />
+                    <span className="truncate">الأنشطة والتقارير والفعاليات</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onSelectView('supervisor_attendance');
+                      onClose();
+                    }}
+                    className={`w-full min-h-[44px] px-3 py-2.5 rounded-xl text-sm font-extrabold flex items-center gap-2.5 transition cursor-pointer ${
+                      activeView === 'supervisor_attendance'
+                        ? 'bg-white/18 text-white border-r-4 border-white shadow-2xs'
+                        : 'text-white/95 hover:bg-white/10'
+                    }`}
+                  >
+                    <FileSpreadsheet className="w-4 h-4 text-white/90 shrink-0" />
+                    <span className="truncate">الحضور والغياب</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onSelectView('supervisor_schedule');
+                      onClose();
+                    }}
+                    className={`w-full min-h-[44px] px-3 py-2.5 rounded-xl text-sm font-extrabold flex items-center gap-2.5 transition cursor-pointer ${
+                      activeView === 'supervisor_schedule'
+                        ? 'bg-white/18 text-white border-r-4 border-white shadow-2xs'
+                        : 'text-white/95 hover:bg-white/10'
+                    }`}
+                  >
+                    <CalendarCheck className="w-4 h-4 text-white/90 shrink-0" />
+                    <span className="truncate">جدول الحصص الأسبوعي</span>
+                  </button>
+                </>
+              )}
+
               {/* 2. مجلد الأرشفة (ActionForex-style collapsible row: chevron rotates & label underlines on open) */}
+              {session.role !== 'supervisor' && (
               <div>
                 <button
                   type="button"
@@ -488,6 +567,7 @@ export const UnifiedSidebar: React.FC<UnifiedSidebarProps> = ({
                   </div>
                 </div>
               </div>
+              )}
 
               {/* 3. حسابي (للطلاب فقط) */}
               {session.role === 'student' && onOpenAccount && (

@@ -378,6 +378,67 @@
       },
       "required": ["id", "teacherId", "teacherName", "schoolId", "grade", "subject", "content"]
     },
+    "attendanceRecord": {
+      "title": "AttendanceRecord",
+      "description": "Daily class attendance sheet recorded by the school supervisor",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Deterministic ID schoolId_grade_class_date" },
+        "schoolId": { "type": "string", "description": "School identifier" },
+        "grade": { "type": "string", "description": "Grade level" },
+        "gradeLabel": { "type": "string", "description": "Arabic grade label" },
+        "classNumber": { "type": "string", "description": "Class/section identifier" },
+        "date": { "type": "string", "description": "YYYY-MM-DD date string" },
+        "entries": { "type": "array", "description": "List of student attendance entries" },
+        "recordedBy": { "type": "string", "description": "Supervisor full name" },
+        "supervisorCode": { "type": "string", "description": "Supervisor activation code" },
+        "createdAt": { "type": "number", "description": "Creation timestamp ms" },
+        "createdAtFormatted": { "type": "string", "description": "Formatted Arabic date-time" }
+      },
+      "required": ["id", "schoolId", "grade", "date", "entries", "recordedBy"]
+    },
+    "classSchedule": {
+      "title": "ClassSchedule",
+      "description": "Fixed Term 1 weekly class schedule uploaded by the supervisor and approved once by the principal",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Schedule ID" },
+        "schoolId": { "type": "string", "description": "School identifier" },
+        "grade": { "type": "string", "description": "Grade level" },
+        "gradeLabel": { "type": "string", "description": "Arabic grade label" },
+        "classNumber": { "type": "string", "description": "Class number or section" },
+        "term": { "type": "string", "description": "Fixed Term 1 label" },
+        "entries": { "type": "array", "description": "Schedule slots Saturday-Wednesday periods 1-6" },
+        "uploadedBy": { "type": "string", "description": "Supervisor full name" },
+        "supervisorCode": { "type": "string", "description": "Supervisor activation code" },
+        "uploadedAt": { "type": "number", "description": "Upload timestamp ms" },
+        "uploadedAtFormatted": { "type": "string", "description": "Formatted Arabic upload date" },
+        "isApproved": { "type": "boolean", "description": "Whether principal approved the schedule" },
+        "approvalStatus": { "type": "string", "description": "pending, approved, or rejected" },
+        "approvedBy": { "type": "string", "description": "Principal name" },
+        "approvedAt": { "type": "number", "description": "Approval timestamp ms" }
+      },
+      "required": ["id", "schoolId", "grade", "term", "entries", "uploadedBy", "isApproved"]
+    },
+    "supervisorActivity": {
+      "title": "SupervisorActivity",
+      "description": "Supervisor reports, events, sports/cultural activities, and school trips",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Activity ID" },
+        "schoolId": { "type": "string", "description": "School identifier" },
+        "category": { "type": "string", "description": "تقرير, فعالية, نشاط رياضي, نشاط ثقافي, رحلة مدرسية" },
+        "title": { "type": "string", "description": "Activity title" },
+        "details": { "type": "string", "description": "Activity description" },
+        "grade": { "type": "string", "description": "Target grade or all" },
+        "activityDate": { "type": "string", "description": "YYYY-MM-DD date" },
+        "supervisorName": { "type": "string", "description": "Supervisor name" },
+        "supervisorCode": { "type": "string", "description": "Supervisor code" },
+        "createdAt": { "type": "number", "description": "Creation timestamp ms" },
+        "createdAtFormatted": { "type": "string", "description": "Formatted date-time" }
+      },
+      "required": ["id", "schoolId", "category", "title", "details", "supervisorName"]
+    },
     "testConnection": {
       "title": "TestConnection",
       "description": "Connection health check entity",
@@ -454,6 +515,18 @@
     "/recommendations/{recId}": {
       "schema": "teacherRecommendation",
       "description": "Collection storing public and student-private teacher recommendations"
+    },
+    "/attendance_records/{recordId}": {
+      "schema": "attendanceRecord",
+      "description": "Collection storing daily attendance records created by supervisors"
+    },
+    "/class_schedules/{scheduleId}": {
+      "schema": "classSchedule",
+      "description": "Collection storing fixed Term 1 class schedules uploaded by supervisors and approved by principals"
+    },
+    "/supervisor_activities/{activityId}": {
+      "schema": "supervisorActivity",
+      "description": "Collection storing supervisor reports, events, sports/cultural activities, and school trips"
     }
   }
 }

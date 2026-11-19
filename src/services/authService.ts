@@ -27,7 +27,7 @@ import {
   clearFirebaseError,
 } from '../firebase/config';
 
-export type UserRole = 'admin' | 'super_admin' | 'principal' | 'teacher' | 'student';
+export type UserRole = 'admin' | 'super_admin' | 'principal' | 'supervisor' | 'teacher' | 'student';
 
 export interface UserSession {
   code: string;
@@ -184,7 +184,7 @@ export interface ActivationCodeRecord {
   role: UserRole;
   roleTitleAr: string;
   assignedToName: string;
-  grade?: '7' | '8' | '9';
+  grade?: string;
   class?: string;
   subject?: string;
   phone?: string;
@@ -312,15 +312,15 @@ export function resolveLocalSessionForCode(inputCode: string): UserSession | nul
           code: match.code,
           name: match.role === 'principal' ? match.assignedToName.replace(/صف\s*8|الصف\s*8/gi, '').trim() : match.assignedToName,
           role: match.role,
-          roleTitleAr: match.role === 'principal' ? 'مدير مدرسة' : match.roleTitleAr,
+          roleTitleAr: match.role === 'principal' ? 'مدير مدرسة' : match.role === 'supervisor' ? 'مشرف' : match.roleTitleAr,
           activatedAt: match.activatedAt || now.toISOString(),
           expiresAt: defaultExpiry,
           daysRemaining: daysLeft,
           isTest: match.isTest || false,
-          grade: match.role === 'principal' ? undefined : match.grade,
-          class: match.role === 'principal' ? undefined : match.grade,
+          grade: match.role === 'principal' || match.role === 'supervisor' ? undefined : match.grade,
+          class: match.role === 'principal' || match.role === 'supervisor' ? undefined : match.grade,
           studentCode: match.code,
-          subject: match.role === 'principal' ? undefined : match.subject,
+          subject: match.role === 'principal' || match.role === 'supervisor' ? undefined : match.subject,
           schoolId: match.schoolId || '',
           schoolName: match.schoolName || '',
         };
@@ -938,15 +938,15 @@ class AuthService {
           code: record.code,
           name: record.role === 'principal' ? record.assignedToName.replace(/صف\s*8|الصف\s*8/gi, '').trim() : record.assignedToName,
           role: record.role,
-          roleTitleAr: record.role === 'principal' ? 'مدير مدرسة' : record.roleTitleAr,
+          roleTitleAr: record.role === 'principal' ? 'مدير مدرسة' : record.role === 'supervisor' ? 'مشرف' : record.roleTitleAr,
           activatedAt: record.activatedAt || now.toISOString(),
           expiresAt: finalExpiry,
           daysRemaining: daysLeft,
           isTest: record.isTest || false,
-          grade: record.role === 'principal' ? undefined : record.grade,
-          class: record.role === 'principal' ? undefined : record.grade,
+          grade: record.role === 'principal' || record.role === 'supervisor' ? undefined : record.grade,
+          class: record.role === 'principal' || record.role === 'supervisor' ? undefined : record.grade,
           studentCode: record.code,
-          subject: record.role === 'principal' ? undefined : resolvedTeacherSubject,
+          subject: record.role === 'principal' || record.role === 'supervisor' ? undefined : resolvedTeacherSubject,
           schoolId: school ? school.id : schoolId,
           schoolName: record.schoolName || school?.name || 'منصة التعليم اليمني',
         };

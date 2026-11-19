@@ -128,5 +128,23 @@ service cloud.firestore {
       allow read: if true;
       allow write: if isValidId(recId);
     }
+
+    // Supervisor Daily Class Attendance Records (1 per class per day, read-only in Principal reports)
+    match /attendance_records/{recordId} {
+      allow read: if true;
+      allow write: if isValidId(recordId);
+    }
+
+    // Weekly Class Schedules (Term 1 - Uploaded by Supervisor, Approved once by Principal)
+    match /class_schedules/{scheduleId} {
+      allow read: if true;
+      allow write: if isValidId(scheduleId);
+    }
+
+    // Supervisor Activities (Reports, Events, Sports/Cultural Activities, School Trips)
+    match /supervisor_activities/{activityId} {
+      allow read: if true;
+      allow write: if isValidId(activityId);
+    }
   }
 }
