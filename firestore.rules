@@ -1,132 +1,31 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Default Deny Catch-All
-    match /{document=**} {
-      allow read, write: if false;
-    }
-
-    function isSignedIn() {
-      return request.auth != null;
-    }
-
-    function isValidId(id) {
-      return id is string && id.size() <= 128;
-    }
-
-    // Connection health check test collection
-    match /test/{testId} {
-      allow read: if true;
-    }
-
-    // Super Admin collection (Owner profile and lifetime credentials)
-    match /super_admins/{adminId} {
-      allow read: if true;
-      allow write: if isValidId(adminId);
-    }
-
-    // Schools collection (Educational institutions)
-    match /schools/{schoolId} {
-      allow read: if true;
-      allow write: if isValidId(schoolId);
-    }
-
-    // Activation Codes (Student, Teacher, Principal registration)
-    match /codes/{codeId} {
-      allow read: if true;
-      allow write: if isValidId(codeId);
-    }
-
-    match /registeredCodes/{codeId} {
-      allow read: if true;
-      allow write: if isValidId(codeId);
-    }
-
-    match /activation_codes/{codeId} {
-      allow read: if true;
-      allow write: if isValidId(codeId);
-    }
-
-    // Students and Teachers profile records
-    match /students/{studentId} {
-      allow read: if true;
-      allow write: if isValidId(studentId);
-    }
-
-    match /teachers/{teacherId} {
-      allow read: if true;
-      allow write: if isValidId(teacherId);
-    }
-
-    // Question Bank (Curriculum exercises, MCQ and essay questions)
-    match /questions/{questionId} {
-      allow read: if true;
-      allow write: if isValidId(questionId);
-    }
-
-    // School Announcements and Official Circulars
-    match /announcements/{announcementId} {
-      allow read: if true;
-      allow write: if isValidId(announcementId);
-    }
-
-    match /circulars/{circularId} {
-      allow read: if true;
-      allow write: if isValidId(circularId);
-    }
-
-    // Student Homework Submissions (Notebook photos, answers, grades)
-    match /submissions/{submissionId} {
-      allow read: if true;
-      allow write: if isValidId(submissionId);
-    }
-
-    // Grades Records (Teacher gradebook and student results)
-    match /grades/{gradeId} {
-      allow read: if true;
-      allow write: if isValidId(gradeId);
-    }
-
-    // Answered Questions Tracking (Student completed and closed status)
-    match /answered_questions/{answeredId} {
-      allow read: if true;
-      allow write: if isValidId(answeredId);
-    }
-
-    // Yemeni Curriculum Textbooks (Curriculum books for grades 7, 8, 9)
-    match /textbooks/{bookId} {
-      allow read: if true;
-      allow write: if isValidId(bookId);
-    }
-
-    // Curricula collection for grades 1 to 12
-    match /curricula/{gradeId} {
-      allow read: if true;
-      allow write: if isValidId(gradeId);
-    }
-
-    // Preserved Student Term Results (End of term summary: name, GPA, pass/fail)
-    match /term_results/{resultId} {
-      allow read: if true;
-      allow write: if isValidId(resultId);
-    }
-
-    // Monthly and Cumulative Archived Reports
-    match /monthlyReports/{reportId} {
-      allow read: if true;
-      allow write: if isValidId(reportId);
-    }
-
-    // Monthly Teacher Gradebook Archive & Rollover
-    match /monthlyGradebooks/{recordId} {
-      allow read: if true;
-      allow write: if isValidId(recordId);
-    }
-
-    // Teacher Recommendations and Guidelines
-    match /recommendations/{recId} {
-      allow read: if true;
-      allow write: if isValidId(recId);
-    }
+    match /{document=**} { allow read, write: if false; }
+    function isValidId(id) { return id is string && id.size() <= 128; }
+    match /test/{testId} { allow read: if true; }
+    match /super_admins/{adminId} { allow read: if true; allow write: if isValidId(adminId); }
+    match /schools/{schoolId} { allow read: if true; allow write: if isValidId(schoolId); }
+    match /codes/{codeId} { allow read: if true; allow write: if isValidId(codeId); }
+    match /registeredCodes/{codeId} { allow read: if true; allow write: if isValidId(codeId); }
+    match /activation_codes/{codeId} { allow read: if true; allow write: if isValidId(codeId); }
+    match /students/{studentId} { allow read: if true; allow write: if isValidId(studentId); }
+    match /teachers/{teacherId} { allow read: if true; allow write: if isValidId(teacherId); }
+    match /questions/{questionId} { allow read: if true; allow write: if isValidId(questionId); }
+    match /announcements/{announcementId} { allow read: if true; allow write: if isValidId(announcementId); }
+    match /circulars/{circularId} { allow read: if true; allow write: if isValidId(circularId); }
+    match /submissions/{submissionId} { allow read: true; allow write: if isValidId(submissionId); }
+    match /grades/{gradeId} { allow read: if true; allow write: if isValidId(gradeId); }
+    match /answered_questions/{answeredId} { allow read: if true; allow write: if isValidId(answeredId); }
+    match /textbooks/{bookId} { allow read: if true; allow write: if isValidId(bookId); }
+    match /curricula/{gradeId} { allow read: if true; allow write: if isValidId(gradeId); }
+    match /term_results/{resultId} { allow read: if true; allow write: if isValidId(resultId); }
+    match /monthlyReports/{reportId} { allow read: if true; allow write: if isValidId(reportId); }
+    match /monthlyGradebooks/{recordId} { allow read: if true; allow write: if isValidId(recordId); }
+    match /recommendations/{recId} { allow read: if true; allow write: if isValidId(recId); }
+    match /attendance/{id} { allow read: if true; allow write: if isValidId(id); }
+    match /classSchedules/{id} { allow read: if true; allow write: if isValidId(id); }
+    match /supervisorActivities/{id} { allow read: if true; allow write: if isValidId(id); }
+    match /inAppNotifications/{id} { allow read: if true; allow write: if isValidId(id); }
   }
 }
