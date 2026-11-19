@@ -1418,7 +1418,7 @@ export const PrincipalStatsTab: React.FC<PrincipalStatsTabProps> = ({
             )}
           </section>
 
-          {/* تقارير الحضور والغياب اليومية (يسجلها المشرف وتحفظ مباشرة - المدير يشوفها فقط في التقارير) */}
+          {/* تقارير الحضور والغياب اليومية (تظهر للمدير في التقارير والاعتماد في البريد) */}
           <section className="space-y-3 bg-white rounded-2xl border border-[#DCE7F3] p-4 sm:p-5 shadow-sm">
             <div className="flex items-center justify-between flex-wrap gap-2">
               <div>
@@ -1427,7 +1427,7 @@ export const PrincipalStatsTab: React.FC<PrincipalStatsTabProps> = ({
                   <span>تقارير الحضور والغياب اليومية (من المشرف)</span>
                 </h2>
                 <p className="text-[11px] sm:text-xs font-semibold text-[#5C7085] mt-0.5">
-                  تُحفظ مباشرة من بوابة المشرف وتظهر هنا للمتابعة والاطلاع (كشف واحد لكل فصل يومياً)
+                  تُرفع من بوابة المشرف وتظهر هنا للمتابعة، وتُعتمد من تبويب (البريد) لتُنشر في لوحة المدرسة
                 </p>
               </div>
               <span className="px-2.5 py-1 rounded-full bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] text-[11px] font-black">
@@ -1443,6 +1443,12 @@ export const PrincipalStatsTab: React.FC<PrincipalStatsTabProps> = ({
               <div className="space-y-2.5">
                 {filteredAttendanceRecords.slice(0, 12).map((rec) => {
                   const isExpanded = expandedAttendanceId === rec.id;
+                  const excusedCount =
+                    rec.absentExcusedCount ??
+                    rec.entries.filter((e) => e.status === 'غائب بعذر').length;
+                  const unexcusedCount =
+                    rec.absentUnexcusedCount ??
+                    rec.entries.filter((e) => e.status === 'غائب بدون عذر' || e.status === 'غائب').length;
                   return (
                     <div
                       key={rec.id}
@@ -1461,6 +1467,25 @@ export const PrincipalStatsTab: React.FC<PrincipalStatsTabProps> = ({
                             <span className="px-2 py-0.5 rounded-lg bg-white border border-[#DCE7F3] text-[11px] font-mono font-bold text-[#1F5AAA]">
                               {rec.date}
                             </span>
+                            <span
+                              className={`px-2 py-0.5 rounded-full text-[10px] font-black ${
+                                rec.approvalStatus === 'approved'
+                                  ? 'bg-emerald-100 text-emerald-900'
+                                  : rec.approvalStatus === 'revision_requested'
+                                  ? 'bg-orange-100 text-orange-900'
+                                  : rec.approvalStatus === 'rejected'
+                                  ? 'bg-rose-100 text-rose-900'
+                                  : 'bg-amber-100 text-amber-900'
+                              }`}
+                            >
+                              {rec.approvalStatus === 'approved'
+                                ? 'معتمد'
+                                : rec.approvalStatus === 'revision_requested'
+                                ? 'طلب تعديل'
+                                : rec.approvalStatus === 'rejected'
+                                ? 'مرفوض'
+                                : 'بانتظار الاعتماد'}
+                            </span>
                           </div>
                           <p className="text-[11px] font-semibold text-[#5C7085]">
                             سجّل الحضور: {rec.recordedBy} • {rec.createdAtFormatted}
@@ -1471,8 +1496,11 @@ export const PrincipalStatsTab: React.FC<PrincipalStatsTabProps> = ({
                           <span className="px-2 py-0.5 rounded-lg bg-emerald-100 text-emerald-900 border border-emerald-200 text-[11px] font-black tabular-nums">
                             حاضر: {rec.presentCount}
                           </span>
+                          <span className="px-2 py-0.5 rounded-lg bg-sky-100 text-[#1F5AAA] border border-[#C6DCF2] text-[11px] font-black tabular-nums">
+                            بعذر: {excusedCount}
+                          </span>
                           <span className="px-2 py-0.5 rounded-lg bg-rose-100 text-rose-900 border border-rose-200 text-[11px] font-black tabular-nums">
-                            غائب: {rec.absentCount}
+                            بدون عذر: {unexcusedCount}
                           </span>
                           <span className="px-2 py-0.5 rounded-lg bg-amber-100 text-amber-900 border border-amber-200 text-[11px] font-black tabular-nums">
                             متأخر: {rec.lateCount}
@@ -1499,12 +1527,14 @@ export const PrincipalStatsTab: React.FC<PrincipalStatsTabProps> = ({
                                 className={`px-2 py-0.5 rounded-lg text-[11px] font-black shrink-0 ${
                                   entry.status === 'حاضر'
                                     ? 'bg-emerald-100 text-emerald-900'
-                                    : entry.status === 'غائب'
-                                    ? 'bg-rose-100 text-rose-900'
-                                    : 'bg-amber-100 text-amber-900'
+                                    : entry.status === 'غائب بعذر'
+                                    ? 'bg-sky-100 text-[#1F5AAA]'
+                                    : entry.status === 'متأخر'
+                                    ? 'bg-amber-100 text-amber-900'
+                                    : 'bg-rose-100 text-rose-900'
                                 }`}
                               >
-                                {entry.status}
+                                {entry.status === 'غائب' ? 'غائب بدون عذر' : entry.status}
                               </span>
                             </div>
                           ))}
@@ -1517,7 +1547,7 @@ export const PrincipalStatsTab: React.FC<PrincipalStatsTabProps> = ({
             )}
           </section>
 
-          {/* تقارير وأنشطة وفعاليات المشرف (للقراءة فقط) */}
+          {/* تقارير وأنشطة وفعاليات المشرف */}
           <section className="space-y-3 bg-white rounded-2xl border border-[#DCE7F3] p-4 sm:p-5 shadow-sm">
             <div className="flex items-center justify-between flex-wrap gap-2">
               <h2 className="text-base sm:text-lg font-black text-[#1A3A5F] flex items-center gap-2">
@@ -1563,7 +1593,12 @@ export const PrincipalStatsTab: React.FC<PrincipalStatsTabProps> = ({
                           <Sparkles className="w-3 h-3" />
                           <span>{act.category}</span>
                         </span>
-                        {act.targetGrade && act.targetGrade !== 'all' && (
+                        {act.subType && (
+                          <span className="px-2 py-0.5 rounded-lg bg-white border border-[#DCE7F3] text-[11px] font-bold text-[#1A3A5F]">
+                            {act.subType}
+                          </span>
+                        )}
+                        {act.targetGrade && act.targetGrade !== 'all' && act.targetGrade !== 'الكل' && (
                           <span className="px-2 py-0.5 rounded-lg bg-white border border-[#DCE7F3] text-[11px] font-bold text-[#1A3A5F]">
                             {getGradeLabelAr(act.targetGrade)}
                           </span>

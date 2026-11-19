@@ -1,5 +1,5 @@
 // YemenEdu Progressive Web App Service Worker (Optimized for Weak / Slow Networks)
-const CACHE_NAME = 'yemenedu-cache-v3';
+const CACHE_NAME = 'yemenedu-cache-v4';
 const NAVIGATION_TIMEOUT_MS = 2500;
 
 const APP_SHELL_ASSETS = [
@@ -13,8 +13,20 @@ const APP_SHELL_ASSETS = [
   '/icon.svg',
 ];
 
+function isDevPreviewHost(hostname) {
+  return (
+    hostname === 'localhost' ||
+    hostname === '127.0.0.1' ||
+    hostname.startsWith('ais-dev-')
+  );
+}
+
 // Install: precache app shell and activate immediately
 self.addEventListener('install', (event) => {
+  if (isDevPreviewHost(self.location.hostname)) {
+    event.waitUntil(self.skipWaiting());
+    return;
+  }
   event.waitUntil(
     caches
       .open(CACHE_NAME)
@@ -27,7 +39,7 @@ self.addEventListener('install', (event) => {
   );
 });
 
-// Activate: clean up older caches and claim clients immediately
+// Activate: clean up ALL older caches and claim clients immediately
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches
@@ -35,7 +47,7 @@ self.addEventListener('activate', (event) => {
       .then((keys) => {
         return Promise.all(
           keys
-            .filter((key) => key !== CACHE_NAME)
+            .filter((key) => key !== CACHE_NAME || isDevPreviewHost(self.location.hostname))
             .map((key) => caches.delete(key))
         );
       })
@@ -43,13 +55,23 @@ self.addEventListener('activate', (event) => {
   );
 });
 
-// Fetch: Fast-fallback navigation on weak networks + Cache-first with background refresh for assets & fonts
+// Fetch: Never intercept Vite dev server / API requests; cache only hashed assets & app shell in production
 self.addEventListener('fetch', (event) => {
   const request = event.request;
   const url = new URL(request.url);
 
-  // Bypass non-GET requests and Firebase data/auth endpoints
+  // Bypass non-GET requests, dev preview host, Vite dev modules, API endpoints, and Firebase endpoints
   if (request.method !== 'GET') return;
+  if (isDevPreviewHost(url.hostname)) return;
+  if (
+    url.pathname.startsWith('/src/') ||
+    url.pathname.startsWith('/@') ||
+    url.pathname.startsWith('/node_modules/') ||
+    url.pathname.startsWith('/api/') ||
+    url.pathname === '/sw.js'
+  ) {
+    return;
+  }
   if (
     url.hostname.includes('firestore.googleapis.com') ||
     url.hostname.includes('identitytoolkit.googleapis.com') ||
@@ -98,16 +120,14 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Static Assets & Fonts (JS, CSS, Images, Fonts, Google Fonts): Cache-first with background revalidation
+  // Hashed build assets (/assets/*), icons, and Google Fonts: Cache-first with background revalidation
   const isGoogleFonts =
     url.hostname === 'fonts.googleapis.com' || url.hostname === 'fonts.gstatic.com';
   if (
     isGoogleFonts ||
-    request.destination === 'script' ||
-    request.destination === 'style' ||
+    url.pathname.startsWith('/assets/') ||
     request.destination === 'image' ||
-    request.destination === 'font' ||
-    url.pathname.startsWith('/assets/')
+    request.destination === 'font'
   ) {
     event.respondWith(
       caches.open(CACHE_NAME).then(async (cache) => {

@@ -5,18 +5,16 @@ import {
   CheckCircle2,
   XCircle,
   Camera,
-  Download,
   Eye,
   Clock,
   Award,
   ChevronLeft,
   Send,
   Lock,
-  Home,
   FileText,
   Megaphone,
+  School,
   User,
-  LogOut,
   Sparkles,
   Bell,
   Image as ImageIcon,
@@ -29,17 +27,15 @@ import {
 import confetti from 'canvas-confetti';
 import { collection, query, where, onSnapshot, addDoc, setDoc, doc, serverTimestamp } from 'firebase/firestore';
 import { db, auth } from '../firebase/config';
-import { authService, UserSession, ALL_SUBJECTS, getSubjectsForGrade, cleanFirestorePayload } from '../services/authService';
+import { authService, UserSession, getSubjectsForGrade, cleanFirestorePayload } from '../services/authService';
 import {
   appDataService,
-  Textbook,
   Question,
   Announcement,
   GradeRecord,
   HomeworkSubmission,
   isObjectiveQuestion,
   isEssayQuestion,
-  buildGoogleDrivePreviewUrl,
   formatArabicDateTime,
   getQuestionTimestamp,
   ACADEMIC_MONTHS,
@@ -56,6 +52,7 @@ import { UnifiedSidebar, StudentArchiveSection } from '../components/UnifiedSide
 import { StudentArchiveModal } from '../components/StudentArchiveModal';
 import { StudentAccountModal } from '../components/StudentAccountModal';
 import { ScheduleGridView } from '../components/ScheduleGridView';
+import { SchoolBoardView } from '../components/SchoolBoardView';
 import { playGentleNotificationSound, unlockNotificationAudio } from '../services/soundUtils';
 import { formatArabicSchoolName, getSchoolPrincipalName, isGenericPrincipalSender, isSimulationAnnouncement } from '../utils/schoolDisplay';
 
@@ -118,8 +115,8 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
   };
   const gradeLabel = getGradeTitle(studentGrade);
 
-  // 5 Bottom Tabs: 'home' (المنهج) | 'homework' (واجباتي) | 'announcements' (التعاميم) | 'grades' (درجاتي) | 'recommendations' (توصيات المعلم) + 'schedule' view
-  const [navTab, setNavTab] = useState<'home' | 'homework' | 'announcements' | 'grades' | 'recommendations' | 'account' | 'schedule'>('home');
+  // 5 Bottom Tabs: 'school_board' (لوحة المدرسة) | 'homework' (واجباتي) | 'announcements' (التعاميم) | 'grades' (درجاتي) | 'recommendations' (توصيات المعلم) + 'schedule' view
+  const [navTab, setNavTab] = useState<'school_board' | 'homework' | 'announcements' | 'grades' | 'recommendations' | 'account' | 'schedule'>('school_board');
   const [approvedGradeSchedules, setApprovedGradeSchedules] = useState<ClassSchedule[]>(() =>
     session.schoolId
       ? appDataService
@@ -137,7 +134,6 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
 
   // Real-time Firestore Synchronized Data
   const subjects = getSubjectsForGrade(studentGrade);
-  const [textbooks, setTextbooks] = useState<Textbook[]>(appDataService.getTextbooks(studentGrade as any));
   const [rawClassQuestions, setRawClassQuestions] = useState<Question[]>(() =>
     session.schoolId ? appDataService.getQuestions(studentGrade as any, undefined, session.schoolId) : []
   );
@@ -437,7 +433,6 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
 
     // 1. AppData local sync
     const unsubAppData = appDataService.subscribe(() => {
-      setTextbooks(appDataService.getTextbooks(studentGrade as any));
       setStudentSubmissions(appDataService.getSubmissions(session.code, undefined, undefined, session.schoolId));
       setRecommendations(
         appDataService.getRecommendations(session.schoolId, studentGrade, undefined, {
@@ -690,10 +685,6 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
       unsubSchedules();
     };
   }, [studentGrade, studentClass, session.schoolId, session.code]);
-
-  // PDF Viewer Modal
-  const [selectedBook, setSelectedBook] = useState<Textbook | null>(null);
-  const [currentPage, setCurrentPage] = useState<number>(1);
 
   // Points start strictly from 0 and match the number and grades of completed homeworks in the active month
   const totalStudentScore = useMemo(() => {
@@ -1165,8 +1156,8 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
           </div>
         )}
 
-        {/* TAB 1: HOME */}
-        {navTab === 'home' && (
+        {/* TAB 1: لوحة المدرسة (تم استبدال تبويب المنهج بلوحة المدرسة المعتمدة + جدول الحصص) */}
+        {navTab === 'school_board' && (
           <div className="space-y-6">
             {latestAnnouncement && (
               <div
@@ -1205,116 +1196,42 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
               </div>
             )}
 
-            {/* بطاقة جدول الحصص الأسبوعي الثابت للترم الأول (معزول تماماً لصف الطالب فقط) */}
-            <button
-              type="button"
-              onClick={() => setNavTab('schedule')}
-              className="w-full bg-white rounded-2xl p-4 sm:p-5 border border-[#DCE7F3] hover:border-[#9BBEDF] shadow-xs hover:bg-[#F4F8FD] transition flex items-center justify-between gap-4 cursor-pointer text-right"
-            >
-              <div className="flex items-center gap-3 min-w-0">
-                <div className="p-2.5 rounded-xl bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] shrink-0">
-                  <Calendar className="w-5 h-5" />
-                </div>
-                <div className="min-w-0">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <h3 className="font-black text-sm sm:text-base text-[#1A3A5F]">
-                      جدول الحصص الأسبوعي — الترم الأول
-                    </h3>
-                    <span className="px-2 py-0.5 rounded-full bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] text-[10px] font-black">
-                      {gradeLabel}
-                    </span>
-                  </div>
-                  <p className="text-xs text-[#5C7085] font-semibold mt-0.5">
-                    {approvedGradeSchedules.length > 0
-                      ? `الجدول المعتمد والثابت لصفك (${approvedGradeSchedules.length} فصل معتمد)`
-                      : 'اضغط لعرض جدول حصص صفك فور اعتماده من مدير المدرسة'}
-                  </p>
-                </div>
-              </div>
-              <div className="flex items-center gap-1 text-xs font-black text-[#1F5AAA] shrink-0">
-                <span>عرض الجدول</span>
-                <ChevronLeft className="w-4 h-4" />
-              </div>
-            </button>
-
-            {/* 7 Yemeni Curriculum Subjects */}
-            <div>
-              <div className="flex items-center justify-between mb-4">
-                <div>
-                  <h2 className="text-lg font-black text-[#1A3A5F] flex items-center gap-2">
-                    <BookOpen className="w-5 h-5 text-[#1F5AAA]" />
-                    المناهج والكتب المقررة لصفك
-                  </h2>
-                  <p className="text-xs text-[#5C7085] font-semibold mt-0.5">
-                    المنهج الكامل المعتمد لوزارة التربية والتعليم (7 مواد دراسية)
-                  </p>
-                </div>
-                <span className="px-3 py-1 rounded-full text-xs font-black bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2]">
-                  {subjects.length} مواد مقررة
-                </span>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-                {subjects.map((sub, subIdx) => {
-                  const book = textbooks.find(
-                    (b) => b?.subject && sub?.nameAr && (b.subject === sub.nameAr || b.subject.includes(sub.nameAr))
-                  ) || {
-                    id: `book-${studentGrade}-${sub.code}`,
-                    title: `${sub.nameAr} - ${gradeLabel}`,
-                    grade: studentGrade,
-                    gradeNameAr: gradeLabel,
-                    subject: sub.nameAr,
-                    part: 'كامل' as const,
-                    pagesCount: 190,
-                    fileSizeMb: 14.2,
-                    coverGradient: 'from-blue-700 to-indigo-900',
-                    sampleSummary: 'المنهج الدراسي المعتمد من قطاع المناهج والتوجيه بوزارة التربية والتعليم للجمهورية اليمنية.',
-                    tableOfContents: ['الوحدة الأولى: البداية والتأسيس', 'الوحدة الثانية: الدروس التطبيقية والأنشطة'],
-                  };
-
-                  return (
-                    <div
-                      key={`subj-${sub.code}-${subIdx}`}
-                      className="bg-white rounded-2xl p-5 border border-[#DCE7F3] shadow-[0_4px_14px_rgba(26,58,95,0.04)] flex flex-col justify-between hover:border-[#9BBEDF] transition group"
-                    >
-                      <div>
-                        <div className="flex items-center justify-between mb-3">
-                          <span className="px-2.5 py-1 rounded-lg text-xs font-mono font-black bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2]">
-                            {sub.code}
-                          </span>
-                          <span className="text-[11px] font-bold text-[#5C7085]">
-                            {book.pagesCount} صفحة
-                          </span>
-                        </div>
-
-                        <div className="w-12 h-12 rounded-xl bg-[#EEF5FC] border border-[#C6DCF2] flex items-center justify-center text-[#1F5AAA] font-bold mb-3 group-hover:scale-105 transition">
-                          <BookOpen className="w-6 h-6" />
-                        </div>
-
-                        <h3 className="font-black text-sm text-[#1A3A5F] mb-1 line-clamp-1">
-                          {sub.nameAr}
-                        </h3>
-                        <p className="text-xs text-slate-600 font-medium line-clamp-2 leading-relaxed">
-                          {book.sampleSummary}
-                        </p>
-                      </div>
-
-                      <div className="pt-4 mt-3 border-t border-[#DCE7F3] flex items-center gap-2">
-                        <button
-                          onClick={() => {
-                            setSelectedBook(book);
-                          }}
-                          className="flex-1 py-2 px-3 bg-[#1F5AAA] hover:bg-[#194B91] text-white border border-[#194B91] text-xs font-black rounded-xl transition flex items-center justify-center gap-1.5 cursor-pointer shadow-xs"
-                        >
-                          <Eye className="w-3.5 h-3.5 text-white" />
-                          <span>عرض</span>
-                        </button>
-                      </div>
+            <SchoolBoardView
+              schoolId={session.schoolId}
+              schoolName={formatArabicSchoolName(session.schoolName, session.schoolId)}
+              topSlot={
+                <button
+                  type="button"
+                  onClick={() => setNavTab('schedule')}
+                  className="w-full bg-white rounded-2xl p-4 sm:p-5 border border-[#DCE7F3] hover:border-[#9BBEDF] shadow-xs hover:bg-[#F4F8FD] transition flex items-center justify-between gap-4 cursor-pointer text-right"
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="p-2.5 rounded-xl bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] shrink-0">
+                      <Calendar className="w-5 h-5" />
                     </div>
-                  );
-                })}
-              </div>
-            </div>
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h3 className="font-black text-sm sm:text-base text-[#1A3A5F]">
+                          جدول الحصص الأسبوعي — الترم الأول
+                        </h3>
+                        <span className="px-2 py-0.5 rounded-full bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] text-[10px] font-black">
+                          {gradeLabel}
+                        </span>
+                      </div>
+                      <p className="text-xs text-[#5C7085] font-semibold mt-0.5">
+                        {approvedGradeSchedules.length > 0
+                          ? `الجدول المعتمد والثابت لصفك (${approvedGradeSchedules.length} فصل معتمد)`
+                          : 'اضغط لعرض جدول حصص صفك فور اعتماده من مدير المدرسة'}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1 text-xs font-black text-[#1F5AAA] shrink-0">
+                    <span>عرض الجدول</span>
+                    <ChevronLeft className="w-4 h-4" />
+                  </div>
+                </button>
+              }
+            />
           </div>
         )}
 
@@ -2261,10 +2178,10 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
               </div>
               <button
                 type="button"
-                onClick={() => setNavTab('home')}
+                onClick={() => setNavTab('school_board')}
                 className="px-3.5 py-2 rounded-xl bg-[#EEF5FC] hover:bg-[#DCEAF9] text-[#1F5AAA] border border-[#C6DCF2] text-xs font-black cursor-pointer transition"
               >
-                العودة للمنهج
+                العودة للوحة المدرسة
               </button>
             </div>
 
@@ -2304,21 +2221,21 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
         className="fixed bottom-[max(0.75rem,env(safe-area-inset-bottom))] inset-x-1.5 sm:inset-x-auto sm:left-1/2 sm:-translate-x-1/2 sm:w-full sm:max-w-2xl z-40"
       >
         <div className="rounded-[24px] sm:rounded-[28px] bg-white/95 backdrop-blur-md border border-[#DCE7F3] shadow-[0_-4px_20px_rgba(26,58,95,0.08)] p-1 sm:p-1.5 grid grid-cols-5 gap-0.5 sm:gap-1 items-center text-center">
-          {/* 1. المنهج */}
+          {/* 1. لوحة المدرسة */}
           <button
             type="button"
             onClick={() => {
               unlockNotificationAudio();
-              setNavTab('home');
+              setNavTab('school_board');
             }}
             className={`min-h-[50px] py-1.5 px-0.5 sm:px-1 rounded-2xl sm:rounded-full flex flex-col items-center justify-center gap-0.5 transition-all cursor-pointer ${
-              navTab === 'home'
+              navTab === 'school_board'
                 ? 'bg-[#EEF5FC] text-[#1F5AAA] font-black shadow-2xs border border-[#C6DCF2]'
                 : 'text-[#5C7085] hover:bg-[#F3F7FB] hover:text-[#1A3A5F] font-bold'
             }`}
           >
-            <BookOpen className="w-4 h-4 sm:w-5 sm:h-5 shrink-0" />
-            <span className="text-[11px] leading-tight text-center font-bold">المنهج</span>
+            <School className="w-4 h-4 sm:w-5 sm:h-5 shrink-0" />
+            <span className="text-[11px] leading-tight text-center font-bold">لوحة المدرسة</span>
           </button>
 
           {/* 2. واجباتي */}
@@ -2434,73 +2351,6 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
           </button>
         </div>
       </nav>
-
-      {/* PDF Viewer Modal */}
-      {/* In-App Google Drive Book Viewer Modal */}
-      {selectedBook && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-[2px] flex items-center justify-center p-2 sm:p-4 animate-in fade-in">
-          <div className="bg-white rounded-2xl w-full max-w-5xl h-[92dvh] flex flex-col shadow-2xl border border-[#DCE7F3] overflow-hidden text-right">
-            {/* Modal Header */}
-            <div className="px-3.5 sm:px-5 py-3 sm:py-3.5 bg-[#1F5AAA] text-white flex flex-wrap items-center justify-between gap-2 border-b border-[#C6DCF2]">
-              <div className="flex items-center gap-2.5 sm:gap-3 min-w-0 flex-1">
-                <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-white flex items-center justify-center text-[#1F5AAA] shrink-0">
-                  <BookOpen className="w-5 h-5" />
-                </div>
-                <div className="min-w-0">
-                  <h3 className="font-black text-sm sm:text-base font-['Cairo'] text-white truncate">
-                    {selectedBook.title || `كتاب ${selectedBook.subject}`}
-                  </h3>
-                  <p className="text-xs text-[#DCE7F3] truncate">
-                    الصف {studentGrade} • {selectedBook.term || 'الترم الدراسي'} • تصفح الكتاب داخل التطبيق
-                  </p>
-                </div>
-              </div>
-
-              <button
-                onClick={() => setSelectedBook(null)}
-                className="px-3 sm:px-4 py-2 rounded-xl bg-white hover:bg-[#EEF5FC] text-[#1F5AAA] font-black text-xs flex items-center gap-1.5 transition cursor-pointer shrink-0"
-                title="إغلاق والعودة للوحة"
-              >
-                <span>✕ إغلاق <span className="hidden sm:inline">والعودة للوحة</span></span>
-              </button>
-            </div>
-
-            {/* Modal Content / Iframe */}
-            <div className="flex-1 w-full h-full bg-[#1e1e1e] relative">
-              {(() => {
-                const previewUrl = selectedBook.previewUrl || buildGoogleDrivePreviewUrl(selectedBook.driveUrl || '');
-                if (previewUrl) {
-                  return (
-                    <iframe
-                      src={previewUrl}
-                      className="w-full h-full border-0"
-                      title={selectedBook.title || selectedBook.subject}
-                      allow="autoplay"
-                    />
-                  );
-                }
-                return (
-                  <div className="flex flex-col items-center justify-center h-full text-center p-6 text-gray-200">
-                    <BookOpen className="w-16 h-16 text-[#B3CDE8] mb-3" />
-                    <h4 className="text-base font-bold text-white mb-1">
-                      لم يتم إرفاق رابط كتاب هذه المادة بعد
-                    </h4>
-                    <p className="text-xs text-gray-300 max-w-md">
-                      يقوم المسؤول بإضافة رابط كتاب جوجل درايف الخاص بمادة "{selectedBook.subject}". ستتمكن من تصفحه مباشرة فور اعتماده.
-                    </p>
-                    <button
-                      onClick={() => setSelectedBook(null)}
-                      className="mt-5 px-5 py-2.5 bg-[#1F5AAA] hover:bg-[#194B91] text-white text-xs font-black rounded-xl cursor-pointer"
-                    >
-                      العودة للوحة الطالب
-                    </button>
-                  </div>
-                );
-              })()}
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* Upload Homework Modal */}
       {showUploadModal && (
@@ -2622,7 +2472,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
         onSelectView={(v: string) => {
           if (v === 'dashboard') {
             setActiveArchiveModal(null);
-            setNavTab('home');
+            setNavTab('school_board');
           } else if (v === 'schedule') {
             setActiveArchiveModal(null);
             setNavTab('schedule');

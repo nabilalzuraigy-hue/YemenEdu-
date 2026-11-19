@@ -69,10 +69,30 @@ function normalizePeriodNumber(rawPeriod: unknown): number {
   return 1;
 }
 
-function normalizeAttendanceStatus(rawStatus: string): 'حاضر' | 'غائب' | 'متأخر' {
+function normalizeAttendanceStatus(
+  rawStatus: string
+): 'حاضر' | 'غائب بعذر' | 'غائب بدون عذر' | 'متأخر' {
   const s = (rawStatus || '').replace(/[أإآ]/g, 'ا').trim().toLowerCase();
-  if (s.includes('غائب') || s.includes('غياب') || s === 'غ' || s === 'x' || s === 'absent') {
-    return 'غائب';
+  if (
+    s.includes('بعذر') ||
+    s.includes('عذر') ||
+    s.includes('مبرر') ||
+    s.includes('مرض') ||
+    s.includes('اجازه') ||
+    s.includes('excused')
+  ) {
+    return 'غائب بعذر';
+  }
+  if (
+    s.includes('بدون عذر') ||
+    s.includes('غائب') ||
+    s.includes('غياب') ||
+    s === 'غ' ||
+    s === 'x' ||
+    s === 'absent' ||
+    s === 'unexcused'
+  ) {
+    return 'غائب بدون عذر';
   }
   if (s.includes('متاخر') || s.includes('تاخر') || s.includes('تاخير') || s === 'م' || s === 'late') {
     return 'متأخر';
@@ -114,9 +134,10 @@ async function startServer() {
               {
                 text: `أنت نظام ذكي متخصص في قراءة كشوفات الحضور والغياب المدرسية الورقية في المدارس اليمنية (خط يد أو مطبوع).
 اقرأ صورة كشف الحضور المرفقة بعناية (${gradeLabel || ''} ${classNumber ? `شعبة ${classNumber}` : ''}).
-استخرج جميع أسماء الطلاب الظاهرة في الكشف بدقة باللغة العربية، وحدد حالة كل طالب بناءً على العلامة بجانب اسمه:
-- علامة صح (✓ / ✔) أو حرف (ح) أو كلمة (حاضر) أو خانة حضور -> "حاضر"
-- علامة خطأ (✗ / ×) أو حرف (غ) أو كلمة (غائب) أو دائرة غياب -> "غائب"
+استخرج جميع أسماء الطلاب الظاهرة في الكشف بدقة باللغة العربية، وحدد حالة كل طالب وملاحظة العذر إن وجدت:
+- علامة صح (✓ / ✔) أو حرف (ح) أو كلمة (حاضر) -> "حاضر"
+- غياب مع كتابة (بعذر / عذر / مبرر / مرضي / إجازة / حرف ع) -> "غائب بعذر"
+- علامة خطأ (✗ / ×) أو حرف (غ) أو كلمة (غائب / بدون عذر) بدون أي عذر -> "غائب بدون عذر"
 - حرف (م) أو كلمة (متأخر / تأخير) -> "متأخر"
 - إذا كانت الخانة غير واضحة تماماً فاعتبره "حاضر" ما لم توجد علامة غياب/تأخير واضحة.
 لا تخترع أسماء غير موجودة في الصورة، وأعد النتيجة بصيغة JSON منظمة فقط.`,
@@ -137,8 +158,12 @@ async function startServer() {
                     studentName: { type: Type.STRING, description: 'اسم الطالب الكامل كما في الكشف' },
                     status: {
                       type: Type.STRING,
-                      enum: ['حاضر', 'غائب', 'متأخر'],
+                      enum: ['حاضر', 'غائب بعذر', 'غائب بدون عذر', 'متأخر'],
                       description: 'حالة حضور الطالب',
+                    },
+                    note: {
+                      type: Type.STRING,
+                      description: 'سبب العذر أو ملاحظة قصيرة إن وجدت في الكشف',
                     },
                   },
                   required: ['studentName', 'status'],
@@ -154,14 +179,16 @@ async function startServer() {
       const parsed = JSON.parse(response.text || '{}');
       const rawStudents = Array.isArray(parsed.students) ? parsed.students : [];
       const students = rawStudents
-        .map((item: { studentName?: string; status?: string }) => ({
+        .map((item: { studentName?: string; status?: string; note?: string }) => ({
           studentName: String(item.studentName || '').trim(),
           status: normalizeAttendanceStatus(String(item.status || 'حاضر')),
+          note: typeof item.note === 'string' && item.note.trim() ? item.note.trim() : undefined,
         }))
         .filter((item: { studentName: string }) => item.studentName.length > 0);
 
       res.json({
         students,
+        entries: students,
         sheetNotes: typeof parsed.sheetNotes === 'string' ? parsed.sheetNotes : '',
       });
     } catch (error) {

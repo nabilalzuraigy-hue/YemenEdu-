@@ -5,6 +5,8 @@ import {
   Send,
   Trash2,
   GraduationCap,
+  Inbox,
+  School,
 } from 'lucide-react';
 import { collection, query, where, onSnapshot } from 'firebase/firestore';
 import { db } from '../firebase/config';
@@ -12,13 +14,17 @@ import { UserSession } from '../services/authService';
 import {
   appDataService,
   Announcement,
+  AttendanceRecord,
   HomeworkSubmission,
   Question,
+  SupervisorActivity,
 } from '../services/appData';
 import { PrincipalStatsTab } from '../components/PrincipalStatsTab';
 import { UnifiedSidebar } from '../components/UnifiedSidebar';
 import { PrincipalArchiveView } from '../components/PrincipalArchiveView';
 import { PrincipalReportPdfModal, PrincipalStudentReportItem } from '../components/PrincipalReportPdfModal';
+import { PrincipalInboxTab } from '../components/PrincipalInboxTab';
+import { SchoolBoardView } from '../components/SchoolBoardView';
 import { playGentleNotificationSound } from '../services/soundUtils';
 import {
   formatArabicSchoolName,
@@ -40,12 +46,13 @@ interface PrincipalDashboardProps {
 
 export const PrincipalDashboard: React.FC<PrincipalDashboardProps> = ({ session }) => {
   const currentUser = session;
-  const [activeTab, setActiveTab] = useState<'statistics' | 'announcements'>('statistics');
+  const [activeTab, setActiveTab] = useState<'statistics' | 'announcements' | 'inbox' | 'school_board'>('statistics');
   const [sidebarView, setSidebarView] = useState<PrincipalViewType>('dashboard');
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
   const [submissions, setSubmissions] = useState<HomeworkSubmission[]>([]);
   const [unreadAnnouncementsCount, setUnreadAnnouncementsCount] = useState<number>(0);
+  const [pendingInboxCount, setPendingInboxCount] = useState<number>(0);
   const playedCircularIdsRef = useRef<Set<string>>(new Set());
 
   // PDF Modal for Archive
@@ -215,10 +222,67 @@ export const PrincipalDashboard: React.FC<PrincipalDashboardProps> = ({ session 
       );
     } catch (_) {}
 
+    // 4. Live pending count for البريد (supervisor_activities + attendance_records)
+    const normalizedSchool = currentUser.schoolId.trim().toLowerCase();
+    let actPending = 0;
+    let attPending = 0;
+    const syncPendingCounts = () => {
+      setPendingInboxCount(actPending + attPending);
+    };
+
+    const computeLocalCounts = () => {
+      const localActs = appDataService.getSupervisorActivities(currentUser.schoolId);
+      const localAtts = appDataService.getAttendanceRecords(currentUser.schoolId);
+      actPending = localActs.filter((a) => !a.approvalStatus || a.approvalStatus === 'pending').length;
+      attPending = localAtts.filter((r) => !r.approvalStatus || r.approvalStatus === 'pending').length;
+      syncPendingCounts();
+    };
+    computeLocalCounts();
+    const unsubLocalInbox = appDataService.subscribe(computeLocalCounts);
+
+    let unsubInboxAct = () => {};
+    let unsubInboxAtt = () => {};
+    try {
+      unsubInboxAct = onSnapshot(
+        query(collection(db, 'supervisor_activities'), where('schoolId', '==', currentUser.schoolId)),
+        (snap) => {
+          actPending = snap.docs
+            .map((d) => d.data() as SupervisorActivity)
+            .filter(
+              (a) =>
+                (a.schoolId || '').trim().toLowerCase() === normalizedSchool &&
+                (!a.approvalStatus || a.approvalStatus === 'pending')
+            ).length;
+          syncPendingCounts();
+        },
+        () => {}
+      );
+    } catch {}
+
+    try {
+      unsubInboxAtt = onSnapshot(
+        query(collection(db, 'attendance_records'), where('schoolId', '==', currentUser.schoolId)),
+        (snap) => {
+          attPending = snap.docs
+            .map((d) => d.data() as AttendanceRecord)
+            .filter(
+              (r) =>
+                (r.schoolId || '').trim().toLowerCase() === normalizedSchool &&
+                (!r.approvalStatus || r.approvalStatus === 'pending')
+            ).length;
+          syncPendingCounts();
+        },
+        () => {}
+      );
+    } catch {}
+
     return () => {
       unsubCirc();
       unsubSubs();
       unsubQuestions();
+      unsubLocalInbox();
+      unsubInboxAct();
+      unsubInboxAtt();
     };
   }, [session.schoolId, session.name]);
 
@@ -482,6 +546,27 @@ export const PrincipalDashboard: React.FC<PrincipalDashboardProps> = ({ session 
               </div>
             </div>
           )}
+
+          {/* TAB 3: البريد (مراجعة واعتماد تقارير وأنشطة وفعاليات وكشوفات حضور المشرف) */}
+          {activeTab === 'inbox' && (
+            <PrincipalInboxTab
+              schoolId={session.schoolId}
+              schoolName={formatArabicSchoolName(session.schoolName, session.schoolId)}
+              principalName={
+                session.name && !isGenericPrincipalSender(session.name)
+                  ? session.name
+                  : getSchoolPrincipalName(session.schoolId, session.schoolName)
+              }
+            />
+          )}
+
+          {/* TAB 4: لوحة المدرسة (المعتمدة فقط) */}
+          {activeTab === 'school_board' && (
+            <SchoolBoardView
+              schoolId={session.schoolId}
+              schoolName={formatArabicSchoolName(session.schoolName, session.schoolId)}
+            />
+          )}
         </>
       )}
 
@@ -511,30 +596,30 @@ export const PrincipalDashboard: React.FC<PrincipalDashboardProps> = ({ session 
 
       </div>
 
-      {/* FLOATING BOTTOM NAVIGATION BAR (Pure White & Calm Azure Active State matching reference) */}
+      {/* FLOATING BOTTOM NAVIGATION BAR (4 Tabs: الإحصائيات | التعاميم | البريد | لوحة المدرسة) */}
       <nav
         aria-label="التنقل السفلي"
-        className="fixed bottom-[max(0.75rem,env(safe-area-inset-bottom))] inset-x-2.5 sm:inset-x-auto sm:left-1/2 sm:-translate-x-1/2 sm:w-full sm:max-w-md z-40"
+        className="fixed bottom-[max(0.75rem,env(safe-area-inset-bottom))] inset-x-2 sm:inset-x-auto sm:left-1/2 sm:-translate-x-1/2 sm:w-full sm:max-w-2xl z-40"
       >
-        <div className="rounded-[24px] sm:rounded-[28px] bg-white/95 backdrop-blur-md border border-[#DCE7F3] shadow-[0_-4px_20px_rgba(26,58,95,0.08)] p-1.5 grid grid-cols-2 gap-1.5 items-center">
-          {/* Tab 1: التقارير والإحصائيات */}
+        <div className="rounded-[24px] sm:rounded-[28px] bg-white/95 backdrop-blur-md border border-[#DCE7F3] shadow-[0_-4px_20px_rgba(26,58,95,0.08)] p-1 sm:p-1.5 grid grid-cols-4 gap-1 items-center text-center">
+          {/* Tab 1: الإحصائيات */}
           <button
             type="button"
             onClick={() => {
               setSidebarView('dashboard');
               setActiveTab('statistics');
             }}
-            className={`min-h-[46px] py-1.5 px-2 sm:px-3 rounded-2xl sm:rounded-full flex items-center justify-center gap-1.5 sm:gap-2 text-[11px] sm:text-xs leading-tight text-center transition-all cursor-pointer whitespace-normal sm:whitespace-nowrap ${
+            className={`min-h-[48px] py-1.5 px-1 sm:px-2 rounded-2xl sm:rounded-full flex flex-col sm:flex-row items-center justify-center gap-0.5 sm:gap-1.5 text-[11px] sm:text-xs leading-tight text-center transition-all cursor-pointer ${
               sidebarView === 'dashboard' && activeTab === 'statistics'
                 ? 'bg-[#EEF5FC] text-[#1F5AAA] font-black shadow-2xs border border-[#C6DCF2]'
                 : 'text-[#5C7085] hover:bg-[#F3F7FB] hover:text-[#1A3A5F] font-bold'
             }`}
           >
             <BarChart3 className="w-4 h-4 shrink-0" />
-            <span>التقارير والإحصائيات</span>
+            <span>الإحصائيات</span>
           </button>
 
-          {/* Tab 2: التعاميم والملاحظات */}
+          {/* Tab 2: التعاميم */}
           <button
             type="button"
             onClick={() => {
@@ -542,7 +627,7 @@ export const PrincipalDashboard: React.FC<PrincipalDashboardProps> = ({ session 
               setActiveTab('announcements');
               setUnreadAnnouncementsCount(0);
             }}
-            className={`min-h-[46px] py-1.5 px-2 sm:px-3 rounded-2xl sm:rounded-full flex items-center justify-center gap-1.5 sm:gap-2 text-[11px] sm:text-xs leading-tight text-center relative transition-all cursor-pointer whitespace-normal sm:whitespace-nowrap ${
+            className={`min-h-[48px] py-1.5 px-1 sm:px-2 rounded-2xl sm:rounded-full flex flex-col sm:flex-row items-center justify-center gap-0.5 sm:gap-1.5 text-[11px] sm:text-xs leading-tight text-center relative transition-all cursor-pointer ${
               sidebarView === 'dashboard' && activeTab === 'announcements'
                 ? 'bg-[#EEF5FC] text-[#1F5AAA] font-black shadow-2xs border border-[#C6DCF2]'
                 : 'text-[#5C7085] hover:bg-[#F3F7FB] hover:text-[#1A3A5F] font-bold'
@@ -551,12 +636,53 @@ export const PrincipalDashboard: React.FC<PrincipalDashboardProps> = ({ session 
             <div className="relative flex items-center shrink-0">
               <Megaphone className="w-4 h-4 shrink-0" />
               {unreadAnnouncementsCount > 0 && (
-                <span className="absolute -top-2 -right-2 w-4 h-4 rounded-full bg-rose-600 text-white text-[9px] font-black flex items-center justify-center border border-white">
+                <span className="absolute -top-2 -right-2 min-w-[16px] h-4 px-1 rounded-full bg-rose-600 text-white text-[9px] font-black flex items-center justify-center border border-white">
                   {unreadAnnouncementsCount}
                 </span>
               )}
             </div>
-            <span>التعاميم والملاحظات</span>
+            <span>التعاميم</span>
+          </button>
+
+          {/* Tab 3: البريد */}
+          <button
+            type="button"
+            onClick={() => {
+              setSidebarView('dashboard');
+              setActiveTab('inbox');
+            }}
+            className={`min-h-[48px] py-1.5 px-1 sm:px-2 rounded-2xl sm:rounded-full flex flex-col sm:flex-row items-center justify-center gap-0.5 sm:gap-1.5 text-[11px] sm:text-xs leading-tight text-center relative transition-all cursor-pointer ${
+              sidebarView === 'dashboard' && activeTab === 'inbox'
+                ? 'bg-[#EEF5FC] text-[#1F5AAA] font-black shadow-2xs border border-[#C6DCF2]'
+                : 'text-[#5C7085] hover:bg-[#F3F7FB] hover:text-[#1A3A5F] font-bold'
+            }`}
+          >
+            <div className="relative flex items-center shrink-0">
+              <Inbox className="w-4 h-4 shrink-0" />
+              {pendingInboxCount > 0 && (
+                <span className="absolute -top-2 -right-2 min-w-[16px] h-4 px-1 rounded-full bg-rose-600 text-white text-[9px] font-black flex items-center justify-center border border-white">
+                  {pendingInboxCount}
+                </span>
+              )}
+            </div>
+            <span>البريد</span>
+          </button>
+
+          {/* Tab 4: لوحة المدرسة */}
+          <button
+            type="button"
+            onClick={() => {
+              setSidebarView('dashboard');
+              setActiveTab('school_board');
+            }}
+            className={`min-h-[48px] py-1.5 px-1 sm:px-2 rounded-2xl sm:rounded-full flex flex-col sm:flex-row items-center justify-center gap-0.5 sm:gap-1.5 text-[11px] sm:text-xs leading-tight text-center transition-all cursor-pointer ${
+              sidebarView === 'dashboard' && activeTab === 'school_board'
+                ? 'bg-[#EEF5FC] text-[#1F5AAA] font-black shadow-2xs border border-[#C6DCF2]'
+                : 'text-[#5C7085] hover:bg-[#F3F7FB] hover:text-[#1A3A5F] font-bold'
+            }`}
+          >
+            <School className="w-4 h-4 shrink-0" />
+            <span>لوحة المدرسة</span>
           </button>
         </div>
       </nav>

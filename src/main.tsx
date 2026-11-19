@@ -32,6 +32,18 @@ if (
     window.location.hostname === '127.0.0.1')
 ) {
   window.addEventListener('load', () => {
+    const isDevPreview =
+      window.location.hostname === 'localhost' ||
+      window.location.hostname === '127.0.0.1' ||
+      window.location.hostname.startsWith('ais-dev-');
+
+    if (isDevPreview && 'caches' in window) {
+      caches
+        .keys()
+        .then((keys) => Promise.all(keys.map((key) => caches.delete(key))))
+        .catch(() => {});
+    }
+
     const hadController = Boolean(navigator.serviceWorker.controller);
     let hasReloadedForNewSW = false;
 
@@ -43,7 +55,7 @@ if (
     });
 
     navigator.serviceWorker
-      .register('/sw.js')
+      .register('/sw.js', { updateViaCache: 'none' })
       .then((reg) => {
         reg.update().catch(() => {});
       })

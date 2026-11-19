@@ -496,7 +496,18 @@ export interface GradeRecord {
   date?: string;
 }
 
-export type AttendanceStatus = 'حاضر' | 'غائب' | 'متأخر';
+export type SupervisorApprovalStatus =
+  | 'pending'
+  | 'approved'
+  | 'revision_requested'
+  | 'rejected';
+
+export type AttendanceStatus =
+  | 'حاضر'
+  | 'غائب بعذر'
+  | 'غائب بدون عذر'
+  | 'متأخر'
+  | 'غائب';
 
 export interface AttendanceEntry {
   studentName: string;
@@ -514,10 +525,17 @@ export interface AttendanceRecord {
   entries: AttendanceEntry[];
   presentCount: number;
   absentCount: number;
+  absentExcusedCount?: number;
+  absentUnexcusedCount?: number;
   lateCount: number;
   recordedBy: string;
   supervisorCode?: string;
-  isDirectSaved: boolean;
+  isDirectSaved?: boolean;
+  approvalStatus?: SupervisorApprovalStatus;
+  principalNote?: string;
+  approvedBy?: string;
+  approvedAt?: number;
+  approvedAtFormatted?: string;
   createdAt: number;
   createdAtFormatted: string;
 }
@@ -593,6 +611,7 @@ export interface ClassSchedule {
 
 export type SupervisorActivityCategory =
   | 'تقرير'
+  | 'نشاط'
   | 'فعالية'
   | 'نشاط رياضي'
   | 'نشاط ثقافي'
@@ -600,22 +619,42 @@ export type SupervisorActivityCategory =
 
 export const SUPERVISOR_ACTIVITY_CATEGORIES: SupervisorActivityCategory[] = [
   'تقرير',
+  'نشاط',
   'فعالية',
   'نشاط رياضي',
   'نشاط ثقافي',
   'رحلة مدرسية',
 ];
 
+export const SUPERVISOR_PRIMARY_CATEGORIES: Array<'تقرير' | 'نشاط' | 'فعالية'> = [
+  'تقرير',
+  'نشاط',
+  'فعالية',
+];
+
+export const SUPERVISOR_SUBTYPES_MAP: Record<'تقرير' | 'نشاط' | 'فعالية', string[]> = {
+  تقرير: ['زيارة فصلية', 'زيارة خاصة', 'تقرير عام'],
+  نشاط: ['رياضي', 'ثقافي', 'مسابقة علمية', 'ترفيهي', 'رحلة مدرسية'],
+  فعالية: ['حفل تكريم', 'يوم وطني', 'فعالية عامة أو مناسبة'],
+};
+
 export interface SupervisorActivity {
   id: string;
   schoolId: string;
   category: SupervisorActivityCategory;
+  subType?: string;
   title: string;
   details: string;
+  images?: string[]; // Up to 3 compressed images
   targetGrade?: string;
   activityDate: string;
   createdBy: string;
   supervisorCode?: string;
+  approvalStatus?: SupervisorApprovalStatus;
+  principalNote?: string;
+  approvedBy?: string;
+  approvedAt?: number;
+  approvedAtFormatted?: string;
   createdAt: number;
   createdAtFormatted: string;
 }
@@ -2180,7 +2219,7 @@ class AppDataService {
     }
   }
 
-  // --- Supervisor Activities & Reports ---
+  // --- Supervisor Activities & Reports (Approval Flow: pending -> approved / revision_requested / rejected) ---
   public getSupervisorActivities(schoolId?: string): SupervisorActivity[] {
     if (!schoolId || !schoolId.trim()) return [];
     const normalizedSchoolId = schoolId.trim().toLowerCase();
@@ -2194,8 +2233,14 @@ class AppDataService {
   ): Promise<SupervisorActivity> {
     await ensureAuthReady();
     const now = Date.now();
+    const cleanImages = Array.isArray(activity.images)
+      ? activity.images.filter((img) => typeof img === 'string' && img.length > 0).slice(0, 3)
+      : undefined;
+
     const newAct: SupervisorActivity = cleanFirestorePayload({
       ...activity,
+      images: cleanImages && cleanImages.length > 0 ? cleanImages : undefined,
+      approvalStatus: activity.approvalStatus || 'pending',
       id: `sact_${now}_${Math.random().toString(36).substring(2, 7)}`,
       createdAt: now,
       createdAtFormatted: formatArabicDateTime(new Date(now)),
@@ -2210,6 +2255,80 @@ class AppDataService {
     return newAct;
   }
 
+  public async updateSupervisorActivity(
+    id: string,
+    updates: Partial<
+      Pick<
+        SupervisorActivity,
+        'category' | 'subType' | 'title' | 'details' | 'images' | 'targetGrade' | 'activityDate'
+      >
+    >
+  ): Promise<void> {
+    await ensureAuthReady();
+    let existing = this.supervisorActivities.find((a) => a.id === id) || null;
+    if (!existing) {
+      const snap = await getDoc(doc(db, 'supervisor_activities', id));
+      if (snap.exists()) existing = snap.data() as SupervisorActivity;
+    }
+    if (!existing) throw new Error('لم يتم العثور على السجل المطلوب تعديله.');
+
+    const cleanImages =
+      updates.images !== undefined
+        ? updates.images.filter((img) => typeof img === 'string' && img.length > 0).slice(0, 3)
+        : existing.images;
+
+    const updated: SupervisorActivity = cleanFirestorePayload({
+      ...existing,
+      ...updates,
+      images: cleanImages && cleanImages.length > 0 ? cleanImages : undefined,
+      approvalStatus: 'pending',
+      principalNote: undefined,
+      createdAt: Date.now(),
+      createdAtFormatted: formatArabicDateTime(new Date()),
+    });
+
+    try {
+      await setDoc(doc(db, 'supervisor_activities', id), updated);
+      this.supervisorActivities = [updated, ...this.supervisorActivities.filter((a) => a.id !== id)];
+      this.notify();
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `supervisor_activities/${id}`);
+    }
+  }
+
+  public async reviewSupervisorActivity(
+    id: string,
+    status: 'approved' | 'revision_requested' | 'rejected',
+    principalName: string,
+    note?: string
+  ): Promise<void> {
+    await ensureAuthReady();
+    let existing = this.supervisorActivities.find((a) => a.id === id) || null;
+    if (!existing) {
+      const snap = await getDoc(doc(db, 'supervisor_activities', id));
+      if (snap.exists()) existing = snap.data() as SupervisorActivity;
+    }
+    if (!existing) throw new Error('لم يتم العثور على السجل المطلوب مراجعته.');
+
+    const now = Date.now();
+    const updated: SupervisorActivity = cleanFirestorePayload({
+      ...existing,
+      approvalStatus: status,
+      principalNote: note?.trim() || undefined,
+      approvedBy: principalName || 'مدير المدرسة',
+      approvedAt: now,
+      approvedAtFormatted: formatArabicDateTime(new Date(now)),
+    });
+
+    try {
+      await setDoc(doc(db, 'supervisor_activities', id), updated);
+      this.supervisorActivities = [updated, ...this.supervisorActivities.filter((a) => a.id !== id)];
+      this.notify();
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `supervisor_activities/${id}`);
+    }
+  }
+
   public async deleteSupervisorActivity(id: string): Promise<void> {
     await ensureAuthReady();
     try {
@@ -2221,7 +2340,7 @@ class AppDataService {
     }
   }
 
-  // --- Supervisor Attendance & Absence (Direct save, max 1 record per class per day) ---
+  // --- Supervisor Attendance & Absence (Sent to Principal for Approval -> Published on School Board) ---
   public getAttendanceRecords(schoolId?: string): AttendanceRecord[] {
     if (!schoolId || !schoolId.trim()) return [];
     const normalizedSchoolId = schoolId.trim().toLowerCase();
@@ -2243,11 +2362,13 @@ class AppDataService {
     const targetId = this.buildAttendanceDocId(schoolId, grade, classNumber, date);
     return this.attendanceRecords.some(
       (r) =>
-        r.id === targetId ||
-        ((r.schoolId || '').trim().toLowerCase() === (schoolId || '').trim().toLowerCase() &&
-          String(r.grade).trim() === String(grade).trim() &&
-          (r.classNumber || '1').trim() === (classNumber || '1').trim() &&
-          r.date === date)
+        (r.id === targetId ||
+          ((r.schoolId || '').trim().toLowerCase() === (schoolId || '').trim().toLowerCase() &&
+            String(r.grade).trim() === String(grade).trim() &&
+            (r.classNumber || '1').trim() === (classNumber || '1').trim() &&
+            r.date === date)) &&
+        r.approvalStatus !== 'revision_requested' &&
+        r.approvalStatus !== 'rejected'
     );
   }
 
@@ -2259,39 +2380,52 @@ class AppDataService {
     entries: AttendanceEntry[];
     recordedBy: string;
     supervisorCode?: string;
+    resubmitRecordId?: string;
   }): Promise<AttendanceRecord> {
     await ensureAuthReady();
     const classNum = (input.classNumber || '1').trim() || '1';
-    const docId = this.buildAttendanceDocId(input.schoolId, input.grade, classNum, input.date);
+    const docId = input.resubmitRecordId || this.buildAttendanceDocId(input.schoolId, input.grade, classNum, input.date);
 
-    // Strictly prevent duplicate attendance on the same day for the same class/section
-    if (this.hasAttendanceForClassDate(input.schoolId, input.grade, classNum, input.date)) {
-      throw new Error(`تم تسجيل حضور وغياب هذا الفصل لتاريخ (${input.date}) مسبقاً، ولا يمكن التسجيل مرتين لنفس الفصل في نفس اليوم.`);
-    }
-
-    try {
-      const existingSnap = await getDoc(doc(db, 'attendance_records', docId));
-      if (existingSnap.exists()) {
-        throw new Error(`تم تسجيل حضور وغياب هذا الفصل لتاريخ (${input.date}) مسبقاً، ولا يمكن التسجيل مرتين لنفس الفصل في نفس اليوم.`);
+    if (!input.resubmitRecordId) {
+      if (this.hasAttendanceForClassDate(input.schoolId, input.grade, classNum, input.date)) {
+        throw new Error(`تم رفع حضور وغياب هذا الفصل لتاريخ (${input.date}) مسبقاً، ولا يمكن التسجيل مرتين لنفس الفصل في نفس اليوم.`);
       }
-    } catch (err: any) {
-      if (err?.message?.includes('مسبقاً')) throw err;
+
+      try {
+        const existingSnap = await getDoc(doc(db, 'attendance_records', docId));
+        if (existingSnap.exists()) {
+          const existingData = existingSnap.data() as AttendanceRecord;
+          if (
+            existingData.approvalStatus !== 'revision_requested' &&
+            existingData.approvalStatus !== 'rejected'
+          ) {
+            throw new Error(`تم رفع حضور وغياب هذا الفصل لتاريخ (${input.date}) مسبقاً، ولا يمكن التسجيل مرتين لنفس الفصل في نفس اليوم.`);
+          }
+        }
+      } catch (err: any) {
+        if (err?.message?.includes('مسبقاً')) throw err;
+      }
     }
 
+    const validStatuses: AttendanceStatus[] = ['حاضر', 'غائب بعذر', 'غائب بدون عذر', 'متأخر', 'غائب'];
     const cleanEntries = input.entries
       .map((e) => ({
         studentName: (e.studentName || '').trim(),
-        status: (['حاضر', 'غائب', 'متأخر'].includes(e.status) ? e.status : 'حاضر') as AttendanceStatus,
+        status: (validStatuses.includes(e.status) ? e.status : 'حاضر') as AttendanceStatus,
         note: e.note?.trim() || undefined,
       }))
       .filter((e) => e.studentName.length > 0);
 
     if (cleanEntries.length === 0) {
-      throw new Error('يرجى التأكد من وجود اسم طالب واحد على الأقل قبل الحفظ.');
+      throw new Error('يرجى التأكد من وجود اسم طالب واحد على الأقل قبل الإرسال.');
     }
 
     const presentCount = cleanEntries.filter((e) => e.status === 'حاضر').length;
-    const absentCount = cleanEntries.filter((e) => e.status === 'غائب').length;
+    const absentExcusedCount = cleanEntries.filter((e) => e.status === 'غائب بعذر').length;
+    const absentUnexcusedCount = cleanEntries.filter(
+      (e) => e.status === 'غائب بدون عذر' || e.status === 'غائب'
+    ).length;
+    const absentCount = absentExcusedCount + absentUnexcusedCount;
     const lateCount = cleanEntries.filter((e) => e.status === 'متأخر').length;
     const now = Date.now();
 
@@ -2305,10 +2439,14 @@ class AppDataService {
       entries: cleanEntries.map((ce) => cleanFirestorePayload(ce)),
       presentCount,
       absentCount,
+      absentExcusedCount,
+      absentUnexcusedCount,
       lateCount,
       recordedBy: input.recordedBy,
       supervisorCode: input.supervisorCode,
-      isDirectSaved: true,
+      isDirectSaved: false,
+      approvalStatus: 'pending',
+      principalNote: undefined,
       createdAt: now,
       createdAtFormatted: formatArabicDateTime(new Date(now)),
     });
@@ -2321,6 +2459,39 @@ class AppDataService {
       handleFirestoreError(error, OperationType.CREATE, `attendance_records/${docId}`);
     }
     return record;
+  }
+
+  public async reviewAttendanceRecord(
+    id: string,
+    status: 'approved' | 'revision_requested' | 'rejected',
+    principalName: string,
+    note?: string
+  ): Promise<void> {
+    await ensureAuthReady();
+    let existing = this.attendanceRecords.find((r) => r.id === id) || null;
+    if (!existing) {
+      const snap = await getDoc(doc(db, 'attendance_records', id));
+      if (snap.exists()) existing = snap.data() as AttendanceRecord;
+    }
+    if (!existing) throw new Error('لم يتم العثور على كشف الحضور المطلوب.');
+
+    const now = Date.now();
+    const updated: AttendanceRecord = cleanFirestorePayload({
+      ...existing,
+      approvalStatus: status,
+      principalNote: note?.trim() || undefined,
+      approvedBy: principalName || 'مدير المدرسة',
+      approvedAt: now,
+      approvedAtFormatted: formatArabicDateTime(new Date(now)),
+    });
+
+    try {
+      await setDoc(doc(db, 'attendance_records', id), updated);
+      this.attendanceRecords = [updated, ...this.attendanceRecords.filter((r) => r.id !== id)];
+      this.notify();
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `attendance_records/${id}`);
+    }
   }
 
   // --- Weekly Class Schedules (Fixed Term 1, Supervisor Uploads -> Principal Approves Once) ---

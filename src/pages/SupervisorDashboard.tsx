@@ -25,6 +25,8 @@ import {
   Trophy,
   BookOpen,
   Compass,
+  Edit3,
+  X,
 } from 'lucide-react';
 import { UserSession, authService, ALL_SUBJECTS } from '../services/authService';
 import {
@@ -39,11 +41,13 @@ import {
   ScheduleSlot,
   SupervisorActivity,
   SupervisorActivityCategory,
-  SUPERVISOR_ACTIVITY_CATEGORIES,
+  SUPERVISOR_PRIMARY_CATEGORIES,
+  SUPERVISOR_SUBTYPES_MAP,
   getGradeLabelAr,
 } from '../services/appData';
 import { UnifiedSidebar, UnifiedSidebarView } from '../components/UnifiedSidebar';
 import { ScheduleGridView } from '../components/ScheduleGridView';
+import { getApprovalBadgeAndFrame } from '../components/PrincipalInboxTab';
 import { formatArabicSchoolName } from '../utils/schoolDisplay';
 
 interface SupervisorDashboardProps {
@@ -103,20 +107,49 @@ const buildEmptyGridSlots = (): Record<string, { subject: string; teacherName: s
   return map;
 };
 
-const getActivityBranchIcon = (cat: SupervisorActivityCategory) => {
-  switch (cat) {
-    case 'تقرير':
-      return FileText;
-    case 'فعالية':
-      return Flag;
-    case 'نشاط رياضي':
-      return Trophy;
-    case 'نشاط ثقافي':
-      return BookOpen;
-    case 'رحلة مدرسية':
-      return Compass;
+const normalizeCategoryBucket = (cat: SupervisorActivityCategory): 'تقرير' | 'نشاط' | 'فعالية' => {
+  if (cat === 'تقرير') return 'تقرير';
+  if (cat === 'فعالية') return 'فعالية';
+  return 'نشاط';
+};
+
+const getActivityBranchIcon = (cat: SupervisorActivityCategory, subType?: string) => {
+  const bucket = normalizeCategoryBucket(cat);
+  if (bucket === 'تقرير') return FileText;
+  if (bucket === 'فعالية') return Flag;
+  if (subType?.includes('ثقافي') || subType?.includes('مسابقة') || cat === 'نشاط ثقافي') return BookOpen;
+  if (subType?.includes('رحلة') || cat === 'رحلة مدرسية') return Compass;
+  return Trophy;
+};
+
+const getAttendanceCardTheme = (status: AttendanceStatus) => {
+  switch (status) {
+    case 'حاضر':
+      return {
+        card: 'bg-emerald-50/75 border-emerald-300',
+        pill: 'bg-emerald-600 text-white border-emerald-700',
+        label: 'حاضر',
+      };
+    case 'غائب بعذر':
+      return {
+        card: 'bg-sky-50/85 border-sky-300',
+        pill: 'bg-[#1F5AAA] text-white border-[#194B91]',
+        label: 'غائب بعذر',
+      };
+    case 'متأخر':
+      return {
+        card: 'bg-amber-50/85 border-amber-300',
+        pill: 'bg-amber-500 text-white border-amber-600',
+        label: 'متأخر',
+      };
+    case 'غائب بدون عذر':
+    case 'غائب':
     default:
-      return Activity;
+      return {
+        card: 'bg-rose-50/85 border-rose-300',
+        pill: 'bg-rose-600 text-white border-rose-700',
+        label: 'غائب بدون عذر',
+      };
   }
 };
 
@@ -127,6 +160,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
   const [activeTab, setActiveTab] = useState<'activities' | 'attendance' | 'schedule'>('activities');
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [toast, setToast] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
+  const [lightboxImage, setLightboxImage] = useState<string | null>(null);
 
   // Live synced data
   const [activities, setActivities] = useState<SupervisorActivity[]>(() =>
@@ -149,16 +183,21 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
       .filter(Boolean);
   }, [schoolId]);
 
-  // --- TAB 1: ACTIVITIES STATE (Branching inside الأنشطة) ---
-  const [selectedActivityBranch, setSelectedActivityBranch] = useState<'الكل' | SupervisorActivityCategory>('تقرير');
-  const [actCategory, setActCategory] = useState<SupervisorActivityCategory>('تقرير');
+  // --- TAB 1: ACTIVITIES STATE (تقرير / نشاط / فعالية + 3 صور -> إرسال إلى المدير للاعتماد) ---
+  const [selectedActivityBranch, setSelectedActivityBranch] = useState<'الكل' | 'تقرير' | 'نشاط' | 'فعالية'>('الكل');
+  const [actCategory, setActCategory] = useState<'تقرير' | 'نشاط' | 'فعالية'>('تقرير');
+  const [actSubType, setActSubType] = useState<string>(SUPERVISOR_SUBTYPES_MAP['تقرير'][0]);
   const [actTitle, setActTitle] = useState('');
   const [actDetails, setActDetails] = useState('');
+  const [actImages, setActImages] = useState<string[]>([]);
   const [actTargetGrade, setActTargetGrade] = useState('الكل');
   const [actDate, setActDate] = useState<string>(() => getTodayIsoDate());
+  const [editingActivityId, setEditingActivityId] = useState<string | null>(null);
   const [isSavingActivity, setIsSavingActivity] = useState(false);
+  const actCameraRef = useRef<HTMLInputElement | null>(null);
+  const actGalleryRef = useRef<HTMLInputElement | null>(null);
 
-  // --- TAB 2: ATTENDANCE STATE (Gemini Vision + Direct Save Once per Class/Day) ---
+  // --- TAB 2: ATTENDANCE STATE (Gemini Vision Prominent Cards + Send to Principal Approval) ---
   const [attGrade, setAttGrade] = useState('7');
   const [attClassNumber, setAttClassNumber] = useState('1');
   const [attDate, setAttDate] = useState<string>(() => getTodayIsoDate());
@@ -167,6 +206,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
   const [isParsingAttendance, setIsParsingAttendance] = useState(false);
   const [attParseError, setAttParseError] = useState<string | null>(null);
   const [isSavingAttendance, setIsSavingAttendance] = useState(false);
+  const [editingAttendanceId, setEditingAttendanceId] = useState<string | null>(null);
   const [expandedAttId, setExpandedAttId] = useState<string | null>(null);
   const attCameraRef = useRef<HTMLInputElement | null>(null);
   const attGalleryRef = useRef<HTMLInputElement | null>(null);
@@ -222,33 +262,122 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
   };
 
   // --- Activity Handlers ---
-  const handleSelectBranch = (branch: 'الكل' | SupervisorActivityCategory) => {
+  const handleSelectBranch = (branch: 'الكل' | 'تقرير' | 'نشاط' | 'فعالية') => {
     setSelectedActivityBranch(branch);
     if (branch !== 'الكل') {
       setActCategory(branch);
+      setActSubType(SUPERVISOR_SUBTYPES_MAP[branch][0]);
     }
   };
 
-  const handleCreateActivity = async (e: React.FormEvent) => {
+  const handleActivityImagesPick = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    e.target.value = '';
+    if (files.length === 0) return;
+
+    const remainingSlots = Math.max(0, 3 - actImages.length);
+    if (remainingSlots === 0) {
+      showToast('error', 'الحد الأقصى للصور المرفقة هو 3 صور فقط.');
+      return;
+    }
+
+    const picked = files.slice(0, remainingSlots);
+    const compressedUrls: string[] = [];
+    for (const file of picked) {
+      try {
+        const { dataUrl } = await compressImageForGemini(file, 850, 0.65);
+        if (dataUrl) compressedUrls.push(dataUrl);
+      } catch {
+        // skip unreadable file
+      }
+    }
+
+    if (compressedUrls.length > 0) {
+      setActImages((prev) => {
+        const next = [...prev, ...compressedUrls].slice(0, 3);
+        const totalSize = next.reduce((sum, img) => sum + img.length, 0);
+        if (totalSize > 750_000) {
+          showToast('error', 'حجم الصور كبير جداً، يرجى تقليل دقة الصور أو عددها.');
+          return prev;
+        }
+        return next;
+      });
+    }
+  };
+
+  const handleStartEditActivity = (act: SupervisorActivity) => {
+    const bucket = normalizeCategoryBucket(act.category);
+    setEditingActivityId(act.id);
+    setActCategory(bucket);
+    const subOptions = SUPERVISOR_SUBTYPES_MAP[bucket];
+    const resolvedSub =
+      act.subType && subOptions.includes(act.subType)
+        ? act.subType
+        : subOptions[0];
+    setActSubType(resolvedSub);
+    setActTitle(act.title || '');
+    setActDetails(act.details || '');
+    setActImages(Array.isArray(act.images) ? act.images.slice(0, 3) : []);
+    setActTargetGrade(act.targetGrade || 'الكل');
+    setActDate(act.activityDate || getTodayIsoDate());
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const handleCancelEditActivity = () => {
+    setEditingActivityId(null);
+    setActTitle('');
+    setActDetails('');
+    setActImages([]);
+  };
+
+  const handleCreateOrResubmitActivity = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!actTitle.trim() || !actDetails.trim() || isSavingActivity) return;
+
+    const totalImgBytes = actImages.reduce((s, x) => s + x.length, 0);
+    if (totalImgBytes > 750_000) {
+      showToast('error', 'حجم الصور المرفقة يتجاوز الحد المسموح، يرجى حذف صورة أو اختيار صورة أصغر.');
+      return;
+    }
+
     setIsSavingActivity(true);
     try {
-      await appDataService.addSupervisorActivity({
-        schoolId,
-        category: actCategory,
-        title: actTitle.trim(),
-        details: actDetails.trim(),
-        targetGrade: actTargetGrade,
-        activityDate: actDate,
-        createdBy: session.name || 'المشرف',
-        supervisorCode: session.code,
-      });
-      setActTitle('');
-      setActDetails('');
-      showToast('success', `✅ تم حفظ (${actCategory}) بنجاح وإتاحته في تقارير مدير المدرسة.`);
+      if (editingActivityId) {
+        await appDataService.updateSupervisorActivity(editingActivityId, {
+          category: actCategory,
+          subType: actSubType,
+          title: actTitle.trim(),
+          details: actDetails.trim(),
+          images: actImages,
+          targetGrade: actTargetGrade,
+          activityDate: actDate,
+        });
+        setEditingActivityId(null);
+        setActTitle('');
+        setActDetails('');
+        setActImages([]);
+        showToast('success', `✅ تم تعديل (${actCategory} - ${actSubType}) وإعادة إرساله إلى مدير المدرسة للاعتماد.`);
+      } else {
+        await appDataService.addSupervisorActivity({
+          schoolId,
+          category: actCategory,
+          subType: actSubType,
+          title: actTitle.trim(),
+          details: actDetails.trim(),
+          images: actImages,
+          targetGrade: actTargetGrade,
+          activityDate: actDate,
+          createdBy: session.name || 'المشرف',
+          supervisorCode: session.code,
+          approvalStatus: 'pending',
+        });
+        setActTitle('');
+        setActDetails('');
+        setActImages([]);
+        showToast('success', `✅ تم إرسال (${actCategory} - ${actSubType}) إلى بريد مدير المدرسة للاعتماد.`);
+      }
     } catch (err: any) {
-      showToast('error', err?.message || 'تعذر حفظ النشاط، يرجى المحاولة مرة أخرى.');
+      showToast('error', err?.message || 'تعذر إرسال الطلب، يرجى المحاولة مرة أخرى.');
     } finally {
       setIsSavingActivity(false);
     }
@@ -256,8 +385,9 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
 
   // --- Attendance Handlers ---
   const attendanceAlreadyExistsToday = useMemo(() => {
+    if (editingAttendanceId) return false;
     return appDataService.hasAttendanceForClassDate(schoolId, attGrade, attClassNumber, attDate);
-  }, [attendanceRecords, schoolId, attGrade, attClassNumber, attDate]);
+  }, [attendanceRecords, schoolId, attGrade, attClassNumber, attDate, editingAttendanceId]);
 
   const handleAttendanceImagePick = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -273,7 +403,12 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
       const response = await fetch('/api/gemini/parse-attendance', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageBase64: base64, mimeType }),
+        body: JSON.stringify({
+          imageBase64: base64,
+          mimeType,
+          gradeLabel: getGradeLabelAr(attGrade),
+          classNumber: attClassNumber,
+        }),
       });
 
       const contentType = response.headers.get('content-type') || '';
@@ -286,12 +421,30 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
         throw new Error(payload?.error || 'تعذر قراءة كشف الحضور من الصورة.');
       }
 
-      const parsed: AttendanceEntry[] = Array.isArray(payload?.entries) ? payload.entries : [];
+      const rawParsed: any[] = Array.isArray(payload?.students)
+        ? payload.students
+        : Array.isArray(payload?.entries)
+        ? payload.entries
+        : [];
+      const parsed: AttendanceEntry[] = rawParsed.map((item) => ({
+        studentName: String(item?.studentName || item?.name || '').trim(),
+        status:
+          item?.status === 'حاضر' ||
+          item?.status === 'غائب بعذر' ||
+          item?.status === 'غائب بدون عذر' ||
+          item?.status === 'متأخر'
+            ? item.status
+            : item?.status === 'غائب'
+            ? 'غائب بدون عذر'
+            : 'حاضر',
+        note: item?.note ? String(item.note).trim() : undefined,
+      })).filter((x) => x.studentName.length > 0);
+
       if (parsed.length === 0) {
         setAttParseError('لم يتم العثور على أسماء واضحة في الصورة. تأكد من وضوح الكشف أو أضف الطلاب يدوياً.');
       } else {
         setAttEntries(parsed);
-        showToast('success', `✨ تم استخراج ${parsed.length} طالباً من الصورة. يرجى مراجعة الأسماء والحالة ثم الضغط على حفظ.`);
+        showToast('success', `✨ تم استخراج ${parsed.length} طالباً وعرضهم ككروت بارزة. راجع الحالة (غائب بعذر / بدون عذر) ثم أرسل للاعتماد.`);
       }
     } catch (err: any) {
       setAttParseError(err?.message || 'حدث خطأ أثناء قراءة صورة كشف الحضور.');
@@ -300,9 +453,26 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
     }
   };
 
+  const handleStartEditAttendance = (rec: AttendanceRecord) => {
+    setEditingAttendanceId(rec.id);
+    setAttGrade(rec.grade);
+    setAttClassNumber(rec.classNumber || '1');
+    setAttDate(rec.date);
+    setAttEntries(
+      rec.entries.map((e) => ({
+        studentName: e.studentName,
+        status: e.status === 'غائب' ? 'غائب بدون عذر' : e.status,
+        note: e.note,
+      }))
+    );
+    setAttImagePreview(null);
+    setAttParseError(null);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
   const handleSaveAttendance = async () => {
     if (attendanceAlreadyExistsToday) {
-      showToast('error', `لا يمكن التسجيل مرتين: تم تسجيل حضور وغياب هذا الفصل بتاريخ ${attDate} مسبقاً.`);
+      showToast('error', `لا يمكن التسجيل مرتين: تم إرسال حضور وغياب هذا الفصل بتاريخ ${attDate} مسبقاً.`);
       return;
     }
     if (attEntries.length === 0) {
@@ -319,13 +489,15 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
         entries: attEntries,
         recordedBy: session.name || 'المشرف',
         supervisorCode: session.code,
+        resubmitRecordId: editingAttendanceId || undefined,
       });
       setAttEntries([]);
       setAttImagePreview(null);
       setAttParseError(null);
-      showToast('success', '✅ تم حفظ سجل الحضور والغياب مباشرة في Firestore بنجاح (يظهر الآن في تقارير المدير).');
+      setEditingAttendanceId(null);
+      showToast('success', '✅ تم إرسال كشف الحضور والغياب إلى بريد مدير المدرسة للاعتماد (وسيظهر في لوحة المدرسة فور الاعتماد).');
     } catch (err: any) {
-      showToast('error', err?.message || 'فشل حفظ كشف الحضور.');
+      showToast('error', err?.message || 'فشل إرسال كشف الحضور.');
     } finally {
       setIsSavingAttendance(false);
     }
@@ -437,12 +609,15 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
   };
 
   const presentCount = attEntries.filter((e) => e.status === 'حاضر').length;
-  const absentCount = attEntries.filter((e) => e.status === 'غائب').length;
+  const absentExcusedCount = attEntries.filter((e) => e.status === 'غائب بعذر').length;
+  const absentUnexcusedCount = attEntries.filter(
+    (e) => e.status === 'غائب بدون عذر' || e.status === 'غائب'
+  ).length;
   const lateCount = attEntries.filter((e) => e.status === 'متأخر').length;
 
   const filteredActivities = useMemo(() => {
     if (selectedActivityBranch === 'الكل') return activities;
-    return activities.filter((a) => a.category === selectedActivityBranch);
+    return activities.filter((a) => normalizeCategoryBucket(a.category) === selectedActivityBranch);
   }, [activities, selectedActivityBranch]);
 
   return (
@@ -497,7 +672,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
         )}
 
         {/* =================================================================== */}
-        {/* TAB 1: الأنشطة (تتفرع داخلها: تقرير / فعالية / رياضي / ثقافي / رحلة) */}
+        {/* TAB 1: الأنشطة (تقرير / نشاط / فعالية + 3 صور -> إرسال للمدير للاعتماد) */}
         {/* =================================================================== */}
         {activeTab === 'activities' && (
           <div className="space-y-5">
@@ -507,22 +682,44 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                 <div>
                   <h2 className="text-base sm:text-lg font-black text-[#1A3A5F] flex items-center gap-2">
                     <Activity className="w-5 h-5 text-[#1F5AAA]" />
-                    <span>الأنشطة والتقارير والفعاليات المدرسية</span>
+                    <span>التقارير والأنشطة والفعاليات المدرسية</span>
                   </h2>
                   <p className="text-xs text-[#5C7085] font-semibold mt-0.5">
-                    اختر الفرع المطلوب للتسجيل والاستعراض (تقرير · فعالية · نشاط رياضي · نشاط ثقافي · رحلة مدرسية)
+                    يرفع المشرف التقرير أو النشاط أو الفعالية مع الصور إلى مدير المدرسة للاعتماد والنشر في لوحة المدرسة
                   </p>
                 </div>
-                <span className="px-3 py-1 rounded-full bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] text-xs font-black">
-                  {activities.length} سجل محفوظ
-                </span>
+                <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-black">
+                  <span className="px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-900 border border-emerald-300">
+                    أخضر: معتمد
+                  </span>
+                  <span className="px-2.5 py-1 rounded-full bg-amber-100 text-amber-900 border border-amber-300">
+                    أصفر: بانتظار الاعتماد
+                  </span>
+                  <span className="px-2.5 py-1 rounded-full bg-orange-100 text-orange-900 border border-orange-300">
+                    برتقالي: طلب تعديل
+                  </span>
+                  <span className="px-2.5 py-1 rounded-full bg-rose-100 text-rose-900 border border-rose-300">
+                    أحمر: مرفوض
+                  </span>
+                </div>
               </div>
 
               <div className="flex flex-wrap items-center gap-2 pt-1">
-                {SUPERVISOR_ACTIVITY_CATEGORIES.map((branch) => {
+                <button
+                  type="button"
+                  onClick={() => handleSelectBranch('الكل')}
+                  className={`px-3.5 py-2 rounded-xl text-xs font-black transition cursor-pointer border ${
+                    selectedActivityBranch === 'الكل'
+                      ? 'bg-[#1A3A5F] text-white border-[#1A3A5F] shadow-xs'
+                      : 'bg-white text-[#5C7085] border-[#DCE7F3] hover:bg-[#F4F8FC]'
+                  }`}
+                >
+                  الكل ({activities.length})
+                </button>
+                {SUPERVISOR_PRIMARY_CATEGORIES.map((branch) => {
                   const Icon = getActivityBranchIcon(branch);
                   const isActive = selectedActivityBranch === branch;
-                  const count = activities.filter((a) => a.category === branch).length;
+                  const count = activities.filter((a) => normalizeCategoryBucket(a.category) === branch).length;
                   return (
                     <button
                       key={branch}
@@ -546,48 +743,86 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                     </button>
                   );
                 })}
-                <button
-                  type="button"
-                  onClick={() => handleSelectBranch('الكل')}
-                  className={`px-3.5 py-2 rounded-xl text-xs font-black transition cursor-pointer border ${
-                    selectedActivityBranch === 'الكل'
-                      ? 'bg-[#1A3A5F] text-white border-[#1A3A5F] shadow-xs'
-                      : 'bg-white text-[#5C7085] border-[#DCE7F3] hover:bg-[#F4F8FC]'
-                  }`}
-                >
-                  عرض الكل ({activities.length})
-                </button>
               </div>
             </div>
 
-            {/* Create Activity / Report Form */}
+            {/* Create / Edit Activity / Report / Event Form */}
             <div className="bg-white rounded-2xl p-5 sm:p-6 border border-[#DCE7F3] shadow-sm space-y-4">
-              <h3 className="text-sm sm:text-base font-black text-[#1A3A5F] flex items-center gap-2">
-                <Plus className="w-4 h-4 text-[#1F5AAA]" />
-                <span>إضافة ({actCategory}) جديد</span>
-              </h3>
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <h3 className="text-sm sm:text-base font-black text-[#1A3A5F] flex items-center gap-2">
+                  {editingActivityId ? (
+                    <Edit3 className="w-4 h-4 text-orange-600" />
+                  ) : (
+                    <Plus className="w-4 h-4 text-[#1F5AAA]" />
+                  )}
+                  <span>
+                    {editingActivityId
+                      ? `تعديل (${actCategory} - ${actSubType}) وإعادة الإرسال للاعتماد`
+                      : `إضافة (${actCategory}) وإرساله إلى المدير للاعتماد`}
+                  </span>
+                </h3>
+                {editingActivityId && (
+                  <button
+                    type="button"
+                    onClick={handleCancelEditActivity}
+                    className="px-3 py-1 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold cursor-pointer"
+                  >
+                    إلغاء التعديل
+                  </button>
+                )}
+              </div>
 
-              <form onSubmit={handleCreateActivity} className="space-y-3.5">
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  <div>
-                    <label className="block text-xs font-bold text-[#1A3A5F] mb-1">تصنيف النشاط:</label>
-                    <select
-                      value={actCategory}
-                      onChange={(e) => {
-                        const val = e.target.value as SupervisorActivityCategory;
-                        setActCategory(val);
-                        setSelectedActivityBranch(val);
-                      }}
-                      className="w-full px-3 py-2.5 rounded-xl border border-[#DCE7F3] bg-[#F4F8FC] text-xs font-bold text-[#1A3A5F] focus:outline-[#1F5AAA]"
-                    >
-                      {SUPERVISOR_ACTIVITY_CATEGORIES.map((c) => (
-                        <option key={c} value={c}>
-                          {c}
-                        </option>
-                      ))}
-                    </select>
+              <form onSubmit={handleCreateOrResubmitActivity} className="space-y-4">
+                {/* Primary Category Switcher */}
+                <div className="grid grid-cols-3 gap-2">
+                  {SUPERVISOR_PRIMARY_CATEGORIES.map((cat) => {
+                    const Icon = getActivityBranchIcon(cat);
+                    const isSelected = actCategory === cat;
+                    return (
+                      <button
+                        key={cat}
+                        type="button"
+                        onClick={() => {
+                          setActCategory(cat);
+                          setActSubType(SUPERVISOR_SUBTYPES_MAP[cat][0]);
+                        }}
+                        className={`py-2.5 px-3 rounded-xl text-xs sm:text-sm font-black flex items-center justify-center gap-1.5 border transition cursor-pointer ${
+                          isSelected
+                            ? 'bg-[#1F5AAA] text-white border-[#194B91] shadow-xs'
+                            : 'bg-[#F4F8FC] text-[#1A3A5F] border-[#DCE7F3] hover:bg-[#EEF5FC]'
+                        }`}
+                      >
+                        <Icon className="w-4 h-4 shrink-0" />
+                        <span>{cat}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Sub-Type Pills */}
+                <div>
+                  <label className="block text-xs font-bold text-[#1A3A5F] mb-1.5">
+                    نوع {actCategory}:
+                  </label>
+                  <div className="flex flex-wrap gap-1.5">
+                    {SUPERVISOR_SUBTYPES_MAP[actCategory].map((sub) => (
+                      <button
+                        key={sub}
+                        type="button"
+                        onClick={() => setActSubType(sub)}
+                        className={`px-3 py-1.5 rounded-xl text-xs font-black border transition cursor-pointer ${
+                          actSubType === sub
+                            ? 'bg-[#1A3A5F] text-white border-[#1A3A5F]'
+                            : 'bg-white text-[#1A3A5F] border-[#DCE7F3] hover:bg-[#EEF5FC]'
+                        }`}
+                      >
+                        {sub}
+                      </button>
+                    ))}
                   </div>
+                </div>
 
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <label className="block text-xs font-bold text-[#1A3A5F] mb-1">الصف المستهدف:</label>
                     <select
@@ -617,27 +852,113 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                 </div>
 
                 <div>
-                  <label className="block text-xs font-bold text-[#1A3A5F] mb-1">عنوان {actCategory}:</label>
+                  <label className="block text-xs font-bold text-[#1A3A5F] mb-1">
+                    عنوان ({actCategory} - {actSubType}):
+                  </label>
                   <input
                     type="text"
                     value={actTitle}
                     onChange={(e) => setActTitle(e.target.value)}
-                    placeholder={`مثال: ${actCategory === 'تقرير' ? 'تقرير الانضباط اليومي' : actCategory === 'رحلة مدرسية' ? 'رحلة علمية لمتحف صنعاء' : 'بطولة كرة القدم المدرسية'}`}
+                    placeholder={`مثال: ${
+                      actCategory === 'تقرير'
+                        ? 'تقرير زيارة فصلية لمتابعة الانضباط في الصف السابع'
+                        : actCategory === 'فعالية'
+                        ? 'حفل تكريم أوائل الطلاب للفصل الأول'
+                        : 'المسابقة العلمية والثقافية بين الفصول'
+                    }`}
                     className="w-full px-3.5 py-2.5 rounded-xl border border-[#DCE7F3] bg-white text-xs sm:text-sm font-semibold text-[#1A3A5F] focus:outline-[#1F5AAA]"
                     required
                   />
                 </div>
 
                 <div>
-                  <label className="block text-xs font-bold text-[#1A3A5F] mb-1">التفاصيل والملاحظات:</label>
+                  <label className="block text-xs font-bold text-[#1A3A5F] mb-1">الوصف والتفاصيل:</label>
                   <textarea
                     rows={3}
                     value={actDetails}
                     onChange={(e) => setActDetails(e.target.value)}
-                    placeholder="اكتب وصفاً موجزاً للنشاط أو التقرير ونتائجه..."
+                    placeholder="اكتب وصفاً واضحاً ومفصلاً للتقرير أو النشاط أو الفعالية ليراجعه مدير المدرسة..."
                     className="w-full p-3 rounded-xl border border-[#DCE7F3] bg-white text-xs sm:text-sm text-[#1A3A5F] focus:outline-[#1F5AAA]"
                     required
                   />
+                </div>
+
+                {/* Up to 3 Photos Uploader */}
+                <div className="p-4 rounded-2xl border-2 border-dashed border-[#9BBEDF] bg-[#F4F8FC] space-y-3">
+                  <input
+                    ref={actCameraRef}
+                    type="file"
+                    accept="image/*"
+                    capture="environment"
+                    onChange={handleActivityImagesPick}
+                    className="hidden"
+                  />
+                  <input
+                    ref={actGalleryRef}
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    onChange={handleActivityImagesPick}
+                    className="hidden"
+                  />
+
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <p className="text-xs font-black text-[#1A3A5F]">
+                        صور {actCategory} (اختياري — حتى 3 صور بحد أقصى)
+                      </p>
+                      <p className="text-[11px] font-semibold text-[#5C7085]">
+                        {actImages.length} / 3 صور مرفقة
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={actImages.length >= 3}
+                        onClick={() => actCameraRef.current?.click()}
+                        className="px-3 py-2 rounded-xl bg-[#1F5AAA] hover:bg-[#194B91] disabled:opacity-50 text-white text-xs font-black flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <Camera className="w-3.5 h-3.5" />
+                        <span>التقاط صورة</span>
+                      </button>
+                      <button
+                        type="button"
+                        disabled={actImages.length >= 3}
+                        onClick={() => actGalleryRef.current?.click()}
+                        className="px-3 py-2 rounded-xl bg-white hover:bg-[#EEF5FC] disabled:opacity-50 text-[#1F5AAA] border border-[#C6DCF2] text-xs font-black flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <ImageIcon className="w-3.5 h-3.5" />
+                        <span>اختيار من المعرض</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {actImages.length > 0 && (
+                    <div className="grid grid-cols-3 gap-2.5 pt-1">
+                      {actImages.map((imgUrl, idx) => (
+                        <div
+                          key={idx}
+                          className="relative rounded-xl overflow-hidden border border-[#DCE7F3] bg-white aspect-video"
+                        >
+                          <img
+                            src={imgUrl}
+                            alt={`صورة ${idx + 1}`}
+                            className="w-full h-full object-cover"
+                          />
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setActImages((prev) => prev.filter((_, i) => i !== idx))
+                            }
+                            className="absolute top-1.5 left-1.5 w-6 h-6 rounded-full bg-rose-600 hover:bg-rose-700 text-white flex items-center justify-center text-xs font-black shadow-sm cursor-pointer"
+                            title="حذف الصورة"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
 
                 <div className="flex justify-end">
@@ -647,55 +968,127 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                     className="px-6 py-2.5 rounded-xl bg-[#1F5AAA] hover:bg-[#194B91] text-white text-xs sm:text-sm font-black shadow-sm border border-[#194B91] flex items-center gap-2 cursor-pointer disabled:opacity-50"
                   >
                     <Send className="w-4 h-4" />
-                    <span>{isSavingActivity ? 'جاري الحفظ...' : `حفظ ${actCategory}`}</span>
+                    <span>
+                      {isSavingActivity
+                        ? 'جاري الإرسال...'
+                        : editingActivityId
+                        ? 'حفظ التعديل وإعادة الإرسال إلى المدير'
+                        : 'إرسال إلى المدير للاعتماد'}
+                    </span>
                   </button>
                 </div>
               </form>
             </div>
 
-            {/* Activities List */}
+            {/* Activities List with Color-Coded Status Frames */}
             <div className="space-y-3">
               <h3 className="text-sm font-black text-[#1A3A5F]">
-                السجلات المحفوظة ({selectedActivityBranch}) — {filteredActivities.length}
+                السجلات المرفوعة ({selectedActivityBranch}) — {filteredActivities.length}
               </h3>
 
               {filteredActivities.length === 0 ? (
                 <div className="bg-white rounded-2xl p-8 border border-[#DCE7F3] text-center text-xs sm:text-sm font-bold text-[#5C7085]">
-                  لا توجد سجلات في فرع ({selectedActivityBranch}) بعد.
+                  لا توجد سجلات في تصنيف ({selectedActivityBranch}) بعد.
                 </div>
               ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
                   {filteredActivities.map((act) => {
-                    const BranchIcon = getActivityBranchIcon(act.category);
+                    const bucket = normalizeCategoryBucket(act.category);
+                    const BranchIcon = getActivityBranchIcon(act.category, act.subType);
+                    const statusStyle = getApprovalBadgeAndFrame(act.approvalStatus || 'pending');
+                    const imgs = Array.isArray(act.images) ? act.images : [];
                     return (
                       <div
                         key={act.id}
-                        className="bg-white rounded-2xl p-4 sm:p-5 border border-[#DCE7F3] shadow-2xs flex flex-col justify-between gap-3"
+                        className={`rounded-2xl p-4 sm:p-5 shadow-2xs flex flex-col justify-between gap-3 ${statusStyle.frame}`}
                       >
                         <div className="space-y-2">
                           <div className="flex items-center justify-between flex-wrap gap-1.5">
-                            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] text-[11px] font-black">
-                              <BranchIcon className="w-3 h-3" />
-                              <span>{act.category}</span>
-                            </span>
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-black ${statusStyle.badge}`}>
+                                {statusStyle.label}
+                              </span>
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-white text-[#1F5AAA] border border-[#C6DCF2] text-[11px] font-black">
+                                <BranchIcon className="w-3 h-3" />
+                                <span>{bucket}</span>
+                              </span>
+                              {(act.subType || (act.category !== bucket && act.category)) && (
+                                <span className="px-2 py-0.5 rounded-full bg-white text-[#1A3A5F] border border-[#DCE7F3] text-[11px] font-bold">
+                                  {act.subType || act.category}
+                                </span>
+                              )}
+                            </div>
+
                             <span className="text-[11px] font-bold text-[#5C7085] tabular-nums">
-                              {act.activityDate} • {act.targetGrade === 'الكل' || !act.targetGrade ? 'جميع الصفوف' : getGradeLabelAr(act.targetGrade)}
+                              {act.activityDate} •{' '}
+                              {act.targetGrade === 'الكل' || !act.targetGrade
+                                ? 'جميع الصفوف'
+                                : getGradeLabelAr(act.targetGrade)}
                             </span>
                           </div>
+
                           <h4 className="font-black text-sm text-[#1A3A5F]">{act.title}</h4>
-                          <p className="text-xs text-slate-600 leading-relaxed whitespace-pre-wrap">{act.details}</p>
+                          <p className="text-xs text-slate-700 leading-relaxed whitespace-pre-wrap font-medium">
+                            {act.details}
+                          </p>
+
+                          {imgs.length > 0 && (
+                            <div
+                              className={`grid gap-2 pt-1 ${
+                                imgs.length === 1
+                                  ? 'grid-cols-1 max-w-xs'
+                                  : imgs.length === 2
+                                  ? 'grid-cols-2'
+                                  : 'grid-cols-3'
+                              }`}
+                            >
+                              {imgs.map((imgUrl, idx) => (
+                                <button
+                                  key={idx}
+                                  type="button"
+                                  onClick={() => setLightboxImage(imgUrl)}
+                                  className="relative rounded-xl overflow-hidden border border-white shadow-xs bg-white aspect-video cursor-pointer"
+                                  title="معاينة الصورة"
+                                >
+                                  <img
+                                    src={imgUrl}
+                                    alt={`${act.title} - صورة ${idx + 1}`}
+                                    className="w-full h-full object-cover"
+                                  />
+                                </button>
+                              ))}
+                            </div>
+                          )}
+
+                          {act.principalNote && (
+                            <div className="p-2.5 rounded-xl bg-white/90 border border-slate-200 text-xs font-bold text-[#1A3A5F]">
+                              ملاحظة المدير: {act.principalNote}
+                            </div>
+                          )}
                         </div>
 
-                        <div className="pt-2.5 border-t border-slate-100 flex items-center justify-between text-[11px] text-[#5C7085] font-semibold">
+                        <div className="pt-2.5 border-t border-black/10 flex flex-wrap items-center justify-between gap-2 text-[11px] text-[#5C7085] font-semibold">
                           <span>بواسطة: {act.createdBy}</span>
-                          <button
-                            type="button"
-                            onClick={() => appDataService.deleteSupervisorActivity(act.id)}
-                            className="text-rose-700 hover:text-rose-900 font-bold flex items-center gap-1 cursor-pointer"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                            <span>حذف</span>
-                          </button>
+                          <div className="flex items-center gap-3">
+                            {act.approvalStatus === 'revision_requested' && (
+                              <button
+                                type="button"
+                                onClick={() => handleStartEditActivity(act)}
+                                className="px-2.5 py-1 rounded-lg bg-orange-500 hover:bg-orange-600 text-white font-black flex items-center gap-1 cursor-pointer shadow-2xs"
+                              >
+                                <Edit3 className="w-3 h-3" />
+                                <span>تعديل وإعادة الإرسال</span>
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => appDataService.deleteSupervisorActivity(act.id)}
+                              className="text-rose-700 hover:text-rose-900 font-bold flex items-center gap-1 cursor-pointer"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                              <span>حذف</span>
+                            </button>
+                          </div>
                         </div>
                       </div>
                     );
@@ -707,7 +1100,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
         )}
 
         {/* =================================================================== */}
-        {/* TAB 2: الحضور والغياب (تصوير الكشف -> قراءة Gemini -> تعديل -> حفظ مباشر) */}
+        {/* TAB 2: الحضور والغياب (تصوير -> قراءة Gemini كروت بارزة -> إرسال للمدير للاعتماد) */}
         {/* =================================================================== */}
         {activeTab === 'attendance' && (
           <div className="space-y-5">
@@ -716,25 +1109,46 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                 <div>
                   <h2 className="text-base sm:text-lg font-black text-[#1A3A5F] flex items-center gap-2">
                     <UserCheck className="w-5 h-5 text-[#1F5AAA]" />
-                    <span>تسجيل الحضور والغياب بتصوير الكشف</span>
+                    <span>
+                      {editingAttendanceId
+                        ? 'تعديل كشف الحضور والغياب وإعادة إرساله للاعتماد'
+                        : 'تسجيل الحضور والغياب لكل صف بتصوير الكشف'}
+                    </span>
                   </h2>
                   <p className="text-xs text-[#5C7085] font-semibold mt-0.5">
-                    صوّر كشف الحضور الورقي ليقرأه التطبيق تلقائياً، راجع الأسماء والحالة ثم احفظ مباشرة (سجل واحد فقط لكل فصل يومياً)
+                    يقرأ Gemini الكشف ويعرضه ككروت بارزة (حاضر / غائب بعذر / غائب بدون عذر / متأخر) ثم يُرسل لمدير المدرسة للاعتماد والظهور في لوحة المدرسة
                   </p>
                 </div>
-                <span className="px-3 py-1 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 text-[11px] font-black">
-                  حفظ مباشر بدون اعتماد المدير
+                <span className="px-3 py-1 rounded-full bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] text-[11px] font-black">
+                  يُرسل للمدير للاعتماد
                 </span>
               </div>
 
-              {/* Grade, Class Number, Date Selection */}
+              {editingAttendanceId && (
+                <div className="p-3 rounded-xl bg-orange-50 border border-orange-300 text-orange-950 text-xs font-bold flex items-center justify-between gap-2">
+                  <span>وضع تعديل الكشف المُعاد من مدير المدرسة — راجع الكروت ثم أعد الإرسال للاعتماد.</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingAttendanceId(null);
+                      setAttEntries([]);
+                    }}
+                    className="px-2.5 py-1 rounded-lg bg-white border border-orange-300 text-orange-800 font-black cursor-pointer"
+                  >
+                    إلغاء التعديل
+                  </button>
+                </div>
+              )}
+
+              {/* Grade, Class Number, Date Selection (Independent per Grade/Class) */}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
-                  <label className="block text-xs font-bold text-[#1A3A5F] mb-1">الصف الدراسي:</label>
+                  <label className="block text-xs font-bold text-[#1A3A5F] mb-1">الصف الدراسي المستقل:</label>
                   <select
                     value={attGrade}
+                    disabled={Boolean(editingAttendanceId)}
                     onChange={(e) => setAttGrade(e.target.value)}
-                    className="w-full px-3 py-2.5 rounded-xl border border-[#DCE7F3] bg-[#F4F8FC] text-xs font-bold text-[#1A3A5F] focus:outline-[#1F5AAA]"
+                    className="w-full px-3 py-2.5 rounded-xl border border-[#DCE7F3] bg-[#F4F8FC] text-xs font-bold text-[#1A3A5F] focus:outline-[#1F5AAA] disabled:opacity-60"
                   >
                     {GRADE_OPTIONS_12.map((g) => (
                       <option key={g.id} value={g.id}>
@@ -749,9 +1163,10 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                   <input
                     type="text"
                     value={attClassNumber}
+                    disabled={Boolean(editingAttendanceId)}
                     onChange={(e) => setAttClassNumber(e.target.value)}
                     placeholder="مثال: 1 أو أ"
-                    className="w-full px-3 py-2.5 rounded-xl border border-[#DCE7F3] bg-white text-xs font-bold text-[#1A3A5F] focus:outline-[#1F5AAA]"
+                    className="w-full px-3 py-2.5 rounded-xl border border-[#DCE7F3] bg-white text-xs font-bold text-[#1A3A5F] focus:outline-[#1F5AAA] disabled:opacity-60"
                     required
                   />
                 </div>
@@ -761,8 +1176,9 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                   <input
                     type="date"
                     value={attDate}
+                    disabled={Boolean(editingAttendanceId)}
                     onChange={(e) => setAttDate(e.target.value)}
-                    className="w-full px-3 py-2.5 rounded-xl border border-[#DCE7F3] bg-white text-xs font-bold text-[#1A3A5F] focus:outline-[#1F5AAA]"
+                    className="w-full px-3 py-2.5 rounded-xl border border-[#DCE7F3] bg-white text-xs font-bold text-[#1A3A5F] focus:outline-[#1F5AAA] disabled:opacity-60"
                     required
                   />
                 </div>
@@ -773,7 +1189,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                 <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-300 text-amber-950 text-xs font-bold flex items-center gap-2">
                   <Lock className="w-4 h-4 text-amber-700 shrink-0" />
                   <span>
-                    تم تسجيل حضور وغياب {getGradeLabelAr(attGrade)} (فصل {attClassNumber || '1'}) بتاريخ {attDate} مسبقاً. لا يمكن التسجيل مرتين لنفس الفصل في نفس اليوم.
+                    تم إرسال كشف حضور وغياب {getGradeLabelAr(attGrade)} (فصل {attClassNumber || '1'}) بتاريخ {attDate} مسبقاً. لا يمكن التسجيل مرتين لنفس الفصل في نفس اليوم.
                   </span>
                 </div>
               )}
@@ -811,7 +1227,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                         className="px-4 py-2 rounded-xl bg-[#1F5AAA] hover:bg-[#194B91] text-white text-xs font-black flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
                       >
                         <Camera className="w-3.5 h-3.5" />
-                        <span>إعادة التصوير</span>
+                        <span>إعادة التصوير بالكاميرا</span>
                       </button>
                       <button
                         type="button"
@@ -828,10 +1244,10 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                   <div className="space-y-2.5">
                     <Camera className="w-10 h-10 text-[#1F5AAA] mx-auto" />
                     <p className="text-xs sm:text-sm font-black text-[#1A3A5F]">
-                      صوّر كشف الحضور والغياب الورقي لقراءته بالذكاء الاصطناعي
+                      افتح الكاميرا وصوّر كشف الحضور والغياب الورقي للصف المحدد
                     </p>
                     <p className="text-[11px] text-[#5C7085] font-semibold">
-                      سيتم استخراج أسماء الطلاب وحالتهم (حاضر / غائب / متأخر) تلقائياً لتتمكن من مراجعتها وتعديلها قبل الحفظ
+                      سيقوم Gemini باستقراء الأسماء وعكسها ككروت بارزة (حاضر / غائب بعذر / غائب بدون عذر / متأخر) لمراجعتها وإرسالها للمدير
                     </p>
                     <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
                       <button
@@ -841,7 +1257,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                         className="px-4 py-2.5 rounded-xl bg-[#1F5AAA] hover:bg-[#194B91] text-white text-xs font-black flex items-center gap-1.5 shadow-xs cursor-pointer disabled:opacity-50"
                       >
                         <Camera className="w-4 h-4" />
-                        <span>تصوير بالكاميرا</span>
+                        <span>فتح الكاميرا وتصوير الكشف</span>
                       </button>
                       <button
                         type="button"
@@ -861,7 +1277,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                         className="px-4 py-2.5 rounded-xl bg-white hover:bg-[#EEF5FC] text-[#1A3A5F] border border-[#DCE7F3] text-xs font-black flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
                       >
                         <Plus className="w-4 h-4" />
-                        <span>إضافة اسم يدوياً</span>
+                        <span>إضافة طالب يدوياً</span>
                       </button>
                     </div>
                   </div>
@@ -870,7 +1286,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                 {isParsingAttendance && (
                   <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-white border border-[#C6DCF2] text-[#1F5AAA] text-xs font-black shadow-xs">
                     <RefreshCw className="w-4 h-4 animate-spin" />
-                    <span>جاري تحليل وقراءة كشف الحضور عبر Gemini...</span>
+                    <span>جاري تحليل الكشف وعكسه في كروت بارزة عبر Gemini...</span>
                   </div>
                 )}
 
@@ -882,36 +1298,51 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                 )}
               </div>
 
-              {/* Editable Review List */}
+              {/* Editable Prominent Cards Review Grid (كروت بارزة) */}
               {attEntries.length > 0 && (
                 <div className="space-y-3 pt-2">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <h3 className="text-sm font-black text-[#1A3A5F]">
-                      مراجعة القائمة المقترحة ({attEntries.length} طالب)
+                      مراجعة كروت الطلاب المقترحة ({attEntries.length} طالب)
                     </h3>
-                    <div className="flex flex-wrap items-center gap-2 text-[11px] font-black">
-                      <span className="px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200">
+                    <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-black">
+                      <span className="px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 tabular-nums">
                         حاضر: {presentCount}
                       </span>
-                      <span className="px-2.5 py-1 rounded-full bg-rose-50 text-rose-800 border border-rose-200">
-                        غائب: {absentCount}
+                      <span className="px-2.5 py-1 rounded-full bg-sky-50 text-[#1F5AAA] border border-[#C6DCF2] tabular-nums">
+                        غائب بعذر: {absentExcusedCount}
                       </span>
-                      <span className="px-2.5 py-1 rounded-full bg-amber-50 text-amber-900 border border-amber-200">
+                      <span className="px-2.5 py-1 rounded-full bg-rose-50 text-rose-800 border border-rose-200 tabular-nums">
+                        غائب بدون عذر: {absentUnexcusedCount}
+                      </span>
+                      <span className="px-2.5 py-1 rounded-full bg-amber-50 text-amber-900 border border-amber-200 tabular-nums">
                         متأخر: {lateCount}
                       </span>
                     </div>
                   </div>
 
-                  <div className="space-y-2 max-h-[420px] overflow-y-auto pr-0.5">
-                    {attEntries.map((entry, idx) => (
-                      <div
-                        key={idx}
-                        className="p-3 rounded-xl border border-[#DCE7F3] bg-[#FAFBFD] flex flex-col sm:flex-row sm:items-center gap-2.5 justify-between"
-                      >
-                        <div className="flex items-center gap-2 flex-1 min-w-0">
-                          <span className="text-xs font-black text-[#5C7085] w-6 text-center shrink-0">
-                            {idx + 1}
-                          </span>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 max-h-[540px] overflow-y-auto pr-0.5 p-0.5">
+                    {attEntries.map((entry, idx) => {
+                      const theme = getAttendanceCardTheme(entry.status);
+                      return (
+                        <div
+                          key={idx}
+                          className={`p-3.5 rounded-2xl border-2 shadow-xs flex flex-col justify-between gap-2.5 transition ${theme.card}`}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-[11px] font-black text-[#1A3A5F] bg-white/85 px-2 py-0.5 rounded-lg border border-white">
+                              كارت طالب #{idx + 1}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => setAttEntries((prev) => prev.filter((_, i) => i !== idx))}
+                              className="p-1 rounded-lg bg-white/80 text-rose-600 hover:bg-rose-100 cursor-pointer"
+                              title="حذف الكارت"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+
                           <input
                             type="text"
                             value={entry.studentName}
@@ -922,47 +1353,66 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                               );
                             }}
                             placeholder="اسم الطالب الثلاثي"
-                            className="flex-1 min-w-0 px-3 py-1.5 rounded-lg border border-[#DCE7F3] bg-white text-xs font-bold text-[#1A3A5F] focus:outline-[#1F5AAA]"
+                            className="w-full px-3 py-2 rounded-xl border border-[#DCE7F3] bg-white text-xs sm:text-sm font-black text-[#1A3A5F] focus:outline-[#1F5AAA]"
                           />
-                        </div>
 
-                        <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
-                          {(['حاضر', 'غائب', 'متأخر'] as AttendanceStatus[]).map((st) => {
-                            const active = entry.status === st;
-                            return (
-                              <button
-                                key={st}
-                                type="button"
-                                onClick={() =>
-                                  setAttEntries((prev) =>
-                                    prev.map((it, i) => (i === idx ? { ...it, status: st } : it))
-                                  )
-                                }
-                                className={`px-3 py-1.5 rounded-lg text-xs font-black transition cursor-pointer border ${
-                                  active
-                                    ? st === 'حاضر'
-                                      ? 'bg-emerald-600 text-white border-emerald-700'
-                                      : st === 'غائب'
-                                      ? 'bg-rose-600 text-white border-rose-700'
-                                      : 'bg-amber-500 text-white border-amber-600'
-                                    : 'bg-white text-[#5C7085] border-[#DCE7F3] hover:bg-[#EEF5FC]'
-                                }`}
-                              >
-                                {st}
-                              </button>
-                            );
-                          })}
-                          <button
-                            type="button"
-                            onClick={() => setAttEntries((prev) => prev.filter((_, i) => i !== idx))}
-                            className="p-1.5 rounded-lg text-rose-600 hover:bg-rose-50 cursor-pointer"
-                            title="حذف السطر"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
+                          <div className="grid grid-cols-2 gap-1.5">
+                            {(
+                              ['حاضر', 'غائب بعذر', 'غائب بدون عذر', 'متأخر'] as AttendanceStatus[]
+                            ).map((st) => {
+                              const active =
+                                entry.status === st ||
+                                (st === 'غائب بدون عذر' && entry.status === 'غائب');
+                              return (
+                                <button
+                                  key={st}
+                                  type="button"
+                                  onClick={() =>
+                                    setAttEntries((prev) =>
+                                      prev.map((it, i) => (i === idx ? { ...it, status: st } : it))
+                                    )
+                                  }
+                                  className={`py-1.5 px-2 rounded-xl text-[11px] font-black transition cursor-pointer border text-center ${
+                                    active
+                                      ? st === 'حاضر'
+                                        ? 'bg-emerald-600 text-white border-emerald-700 shadow-2xs'
+                                        : st === 'غائب بعذر'
+                                        ? 'bg-[#1F5AAA] text-white border-[#194B91] shadow-2xs'
+                                        : st === 'متأخر'
+                                        ? 'bg-amber-500 text-white border-amber-600 shadow-2xs'
+                                        : 'bg-rose-600 text-white border-rose-700 shadow-2xs'
+                                      : 'bg-white text-[#5C7085] border-[#DCE7F3] hover:bg-[#EEF5FC]'
+                                  }`}
+                                >
+                                  {st}
+                                </button>
+                              );
+                            })}
+                          </div>
+
+                          {(entry.status === 'غائب بعذر' ||
+                            entry.status === 'متأخر' ||
+                            Boolean(entry.note)) && (
+                            <input
+                              type="text"
+                              value={entry.note || ''}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setAttEntries((prev) =>
+                                  prev.map((it, i) => (i === idx ? { ...it, note: val } : it))
+                                );
+                              }}
+                              placeholder={
+                                entry.status === 'غائب بعذر'
+                                  ? 'سبب العذر (اختياري)...'
+                                  : 'ملاحظة (اختياري)...'
+                              }
+                              className="w-full px-2.5 py-1.5 rounded-xl border border-[#DCE7F3] bg-white/95 text-[11px] font-semibold text-[#1A3A5F] focus:outline-[#1F5AAA]"
+                            />
+                          )}
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
 
                   <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
@@ -974,7 +1424,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                       className="px-4 py-2 rounded-xl bg-[#F4F8FC] hover:bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] text-xs font-black flex items-center gap-1.5 cursor-pointer"
                     >
                       <Plus className="w-4 h-4" />
-                      <span>إضافة طالب آخر</span>
+                      <span>إضافة كارت طالب آخر</span>
                     </button>
 
                     <button
@@ -983,11 +1433,13 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                       disabled={isSavingAttendance || attendanceAlreadyExistsToday}
                       className="px-6 py-2.5 rounded-xl bg-[#1F5AAA] hover:bg-[#194B91] text-white text-xs sm:text-sm font-black shadow-sm border border-[#194B91] flex items-center gap-2 cursor-pointer disabled:opacity-50"
                     >
-                      <CheckCircle2 className="w-4 h-4" />
+                      <Send className="w-4 h-4" />
                       <span>
                         {isSavingAttendance
-                          ? 'جاري الحفظ...'
-                          : `حفظ الحضور والغياب (${getGradeLabelAr(attGrade)} - فصل ${attClassNumber})`}
+                          ? 'جاري الإرسال...'
+                          : editingAttendanceId
+                          ? 'إعادة إرسال الكشف إلى المدير للاعتماد'
+                          : `إرسال إلى مدير المدرسة للاعتماد (${getGradeLabelAr(attGrade)} - فصل ${attClassNumber})`}
                       </span>
                     </button>
                   </div>
@@ -995,39 +1447,54 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
               )}
             </div>
 
-            {/* Saved Attendance Logs */}
+            {/* Saved / Submitted Attendance Logs with Color-Coded Statuses */}
             <div className="bg-white rounded-2xl p-5 sm:p-6 border border-[#DCE7F3] shadow-sm space-y-3">
               <h3 className="text-sm sm:text-base font-black text-[#1A3A5F]">
-                سجلات الحضور والغياب المحفوظة ({attendanceRecords.length})
+                كشوفات الحضور والغياب المرفوعة ({attendanceRecords.length})
               </h3>
               {attendanceRecords.length === 0 ? (
                 <p className="text-xs text-[#5C7085] font-bold text-center py-6">
-                  لم يتم تسجيل أي كشوفات حضور وغياب بعد.
+                  لم يتم رفع أي كشوفات حضور وغياب بعد.
                 </p>
               ) : (
-                <div className="space-y-2.5">
+                <div className="space-y-3">
                   {attendanceRecords.map((rec) => {
                     const isOpen = expandedAttId === rec.id;
+                    const statusStyle = getApprovalBadgeAndFrame(rec.approvalStatus || 'pending');
+                    const recExcused =
+                      rec.absentExcusedCount ??
+                      rec.entries.filter((e) => e.status === 'غائب بعذر').length;
+                    const recUnexcused =
+                      rec.absentUnexcusedCount ??
+                      rec.entries.filter((e) => e.status === 'غائب بدون عذر' || e.status === 'غائب').length;
                     return (
-                      <div key={rec.id} className="rounded-xl border border-[#DCE7F3] bg-[#FAFBFD] p-3.5 space-y-2.5">
+                      <div key={rec.id} className={`rounded-2xl p-4 space-y-2.5 ${statusStyle.frame}`}>
                         <div className="flex flex-wrap items-center justify-between gap-2">
-                          <div>
-                            <div className="font-black text-xs sm:text-sm text-[#1A3A5F]">
-                              {rec.gradeLabel} — فصل {rec.classNumber} • {rec.date}
+                          <div className="space-y-1">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-black ${statusStyle.badge}`}>
+                                {statusStyle.label}
+                              </span>
+                              <span className="font-black text-xs sm:text-sm text-[#1A3A5F]">
+                                {rec.gradeLabel} — فصل {rec.classNumber} • {rec.date}
+                              </span>
                             </div>
-                            <div className="text-[11px] font-semibold text-[#5C7085] mt-0.5">
+                            <div className="text-[11px] font-semibold text-[#5C7085]">
                               سجل بواسطة: {rec.recordedBy} ({rec.createdAtFormatted})
                             </div>
                           </div>
 
                           <div className="flex flex-wrap items-center gap-1.5">
-                            <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 text-[11px] font-black">
+                            <span className="px-2 py-0.5 rounded-full bg-white text-emerald-800 border border-emerald-200 text-[11px] font-black tabular-nums">
                               حاضر: {rec.presentCount}
                             </span>
-                            <span className="px-2 py-0.5 rounded-full bg-rose-50 text-rose-800 border border-rose-200 text-[11px] font-black">
-                              غائب: {rec.absentCount}
+                            <span className="px-2 py-0.5 rounded-full bg-white text-[#1F5AAA] border border-[#C6DCF2] text-[11px] font-black tabular-nums">
+                              بعذر: {recExcused}
                             </span>
-                            <span className="px-2 py-0.5 rounded-full bg-amber-50 text-amber-900 border border-amber-200 text-[11px] font-black">
+                            <span className="px-2 py-0.5 rounded-full bg-white text-rose-800 border border-rose-200 text-[11px] font-black tabular-nums">
+                              بدون عذر: {recUnexcused}
+                            </span>
+                            <span className="px-2 py-0.5 rounded-full bg-white text-amber-900 border border-amber-200 text-[11px] font-black tabular-nums">
                               متأخر: {rec.lateCount}
                             </span>
                             <button
@@ -1035,33 +1502,56 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                               onClick={() => setExpandedAttId(isOpen ? null : rec.id)}
                               className="px-2.5 py-1 rounded-lg bg-white border border-[#DCE7F3] text-[#1F5AAA] text-[11px] font-black flex items-center gap-1 cursor-pointer"
                             >
-                              <span>{isOpen ? 'إخفاء الأسماء' : 'عرض القائمة'}</span>
+                              <span>{isOpen ? 'إخفاء الكروت' : 'عرض الكروت'}</span>
                               {isOpen ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
                             </button>
                           </div>
                         </div>
 
+                        {rec.principalNote && (
+                          <div className="p-2.5 rounded-xl bg-white/90 border border-slate-200 text-xs font-bold text-[#1A3A5F]">
+                            ملاحظة المدير: {rec.principalNote}
+                          </div>
+                        )}
+
+                        {rec.approvalStatus === 'revision_requested' && (
+                          <div>
+                            <button
+                              type="button"
+                              onClick={() => handleStartEditAttendance(rec)}
+                              className="px-3 py-1.5 rounded-xl bg-orange-500 hover:bg-orange-600 text-white text-xs font-black inline-flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                            >
+                              <Edit3 className="w-3.5 h-3.5" />
+                              <span>تعديل الكشف وإعادة الإرسال للاعتماد</span>
+                            </button>
+                          </div>
+                        )}
+
                         {isOpen && (
-                          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 pt-2 border-t border-[#DCE7F3]">
-                            {rec.entries.map((e, idx) => (
-                              <div
-                                key={idx}
-                                className="flex items-center justify-between gap-2 bg-white px-3 py-2 rounded-lg border border-slate-200 text-xs"
-                              >
-                                <span className="font-bold text-[#1A3A5F] truncate">{e.studentName}</span>
-                                <span
-                                  className={`px-2 py-0.5 rounded-full text-[10px] font-black shrink-0 ${
-                                    e.status === 'حاضر'
-                                      ? 'bg-emerald-100 text-emerald-800'
-                                      : e.status === 'غائب'
-                                      ? 'bg-rose-100 text-rose-800'
-                                      : 'bg-amber-100 text-amber-900'
-                                  }`}
+                          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 pt-2 border-t border-black/10">
+                            {rec.entries.map((e, idx) => {
+                              const cTheme = getAttendanceCardTheme(e.status);
+                              return (
+                                <div
+                                  key={idx}
+                                  className={`flex flex-col gap-1 px-3 py-2.5 rounded-xl border text-xs ${cTheme.card}`}
                                 >
-                                  {e.status}
-                                </span>
-                              </div>
-                            ))}
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className="font-black text-[#1A3A5F] truncate">
+                                      {idx + 1}. {e.studentName}
+                                    </span>
+                                    <span className={`px-2 py-0.5 rounded-lg text-[10px] font-black shrink-0 ${cTheme.pill}`}>
+                                      {cTheme.label}
+                                    </span>
+                                  </div>
+                                  {e.note && (
+                                    <span className="text-[11px] font-semibold text-[#1A3A5F]/80">
+                                      ملاحظة: {e.note}
+                                    </span>
+                                  )}
+                                </div>
+                              );
+                            })}
                           </div>
                         )}
                       </div>
@@ -1475,6 +1965,33 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
         }
         onSelectView={handleSelectSidebarView}
       />
+
+      {/* Photo Lightbox */}
+      {lightboxImage && (
+        <div
+          onClick={() => setLightboxImage(null)}
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-3 sm:p-6 animate-in fade-in"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="relative max-w-3xl w-full bg-white rounded-2xl p-2 shadow-2xl border border-[#DCE7F3]"
+          >
+            <button
+              type="button"
+              onClick={() => setLightboxImage(null)}
+              className="absolute top-3 left-3 z-10 w-9 h-9 rounded-full bg-black/70 hover:bg-black text-white flex items-center justify-center cursor-pointer"
+              aria-label="إغلاق الصورة"
+            >
+              <X className="w-5 h-5" />
+            </button>
+            <img
+              src={lightboxImage}
+              alt="معاينة الصورة"
+              className="w-full max-h-[82dvh] object-contain rounded-xl bg-slate-900"
+            />
+          </div>
+        </div>
+      )}
 
       {/* FLOATING BOTTOM NAVIGATION BAR (Pure White & Calm Azure Active State matching Student/Teacher docks) */}
       <nav
