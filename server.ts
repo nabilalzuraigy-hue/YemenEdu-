@@ -28,7 +28,7 @@ function extractBase64Image(rawInput: string, fallbackMime = 'image/jpeg'): { da
   };
 }
 
-function createGeminiClient(): GoogleGenAI {
+function createGeminiClient(timeoutMs = 15000): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     throw new Error('مفتاح Gemini غير مهيأ على الخادم في Settings > Secrets.');
@@ -36,7 +36,7 @@ function createGeminiClient(): GoogleGenAI {
   return new GoogleGenAI({
     apiKey,
     httpOptions: {
-      timeout: 12000,
+      timeout: timeoutMs,
       headers: {
         'User-Agent': 'aistudio-build',
       },
@@ -698,7 +698,7 @@ ${transcript}
               .join('\n')}`
           : '';
 
-      const ai = createGeminiClient();
+      const ai = createGeminiClient(30000);
       const pageParts = (validImages as Array<{ base64: string; mimeType?: string }>).flatMap((item, idx) => {
         const img = extractBase64Image(item.base64, item.mimeType || 'image/jpeg');
         return [

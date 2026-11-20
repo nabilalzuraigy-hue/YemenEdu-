@@ -98,13 +98,19 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
 
-  const [selectedSchool, setSelectedSchool] = useState<School>(schoolsList[0] || {
-    id: DEFAULT_SCHOOL_ID,
-    name: 'مدرسة الرشيد',
-    prefix: 'RASHEED',
-    city: 'صنعاء',
-    isActive: true,
-  });
+  const [selectedSchool, setSelectedSchool] = useState<School | null>(() => schoolsList[0] || null);
+  const [singleSchoolMode, setSingleSchoolMode] = useState<'existing' | 'new'>(() =>
+    schoolsList.length > 0 ? 'existing' : 'new'
+  );
+  const [singleNewSchoolName, setSingleNewSchoolName] = useState('');
+  const [singleNewSchoolCity, setSingleNewSchoolCity] = useState('صنعاء');
+  const [isSubmittingSingle, setIsSubmittingSingle] = useState(false);
+
+  // Inline Add School Form in Tab 1
+  const [showAddSchoolForm, setShowAddSchoolForm] = useState(false);
+  const [tab1NewSchoolName, setTab1NewSchoolName] = useState('');
+  const [tab1NewSchoolCity, setTab1NewSchoolCity] = useState('صنعاء');
+  const [isCreatingSchool, setIsCreatingSchool] = useState(false);
 
   // Filters & Dynamic Pagination for Registered Codes
   const [selectedSchoolFilter, setSelectedSchoolFilter] = useState<string>('ALL');
@@ -151,11 +157,7 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
 
     const unsubAuth = authService.subscribe(() => {
       setCodesList(authService.getRegisteredCodes());
-      const scs = authService.getSchools();
-      setSchoolsList(scs);
-      if (scs.length > 0 && !selectedSchool) {
-        setSelectedSchool(scs[0]);
-      }
+      setSchoolsList(authService.getSchools());
     });
     const unsubData = appDataService.subscribe(() => {
       setTextbooks(appDataService.getTextbooks());
@@ -165,7 +167,24 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
       unsubAuth();
       unsubData();
     };
-  }, [selectedSchool]);
+  }, []);
+
+  const prevSchoolsCountRef = useRef<number>(schoolsList.length);
+  useEffect(() => {
+    const prevCount = prevSchoolsCountRef.current;
+    prevSchoolsCountRef.current = schoolsList.length;
+    if (schoolsList.length > 0) {
+      setSelectedSchool((prev) => {
+        if (prev && schoolsList.some((s) => s.id === prev.id)) return prev;
+        return schoolsList[0];
+      });
+      if (prevCount === 0 && !singleNewSchoolName.trim()) {
+        setSingleSchoolMode('existing');
+      }
+    } else {
+      setSelectedSchool(null);
+    }
+  }, [schoolsList]);
 
   // Auto-reconcile codes with schools (e.g. AZAL codes to AZAL school)
   useEffect(() => {
@@ -489,6 +508,45 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
     });
   };
 
+  const handleCreateSchoolFromTab1 = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanName = tab1NewSchoolName.trim();
+    if (!cleanName) {
+      setNotice({ type: 'error', text: 'يرجى كتابة اسم المدرسة أولاً.' });
+      return;
+    }
+    const existing = schoolsList.find(
+      (s) => s.name.trim().toLowerCase() === cleanName.toLowerCase()
+    );
+    if (existing) {
+      setSelectedSchool(existing);
+      setSingleSchoolMode('existing');
+      setShowAddSchoolForm(false);
+      setTab1NewSchoolName('');
+      setNotice({ type: 'info', text: `المدرسة "${existing.name}" موجودة مسبقاً وتم اختيارها.` });
+      return;
+    }
+    setIsCreatingSchool(true);
+    try {
+      const created = await authService.addNewSchool(cleanName, tab1NewSchoolCity.trim() || 'صنعاء');
+      setSelectedSchool(created);
+      setSingleSchoolMode('existing');
+      setTab1NewSchoolName('');
+      setShowAddSchoolForm(false);
+      setNotice({
+        type: 'success',
+        text: `✅ تمت إضافة "${created.name}" بنجاح برمز [${created.prefix}] واشتراك 30 يوماً.`,
+      });
+    } catch (err: any) {
+      setNotice({
+        type: 'error',
+        text: `تعذر إضافة المدرسة: ${err?.message || 'تحقق من الاتصال ثم حاول مرة أخرى.'}`,
+      });
+    } finally {
+      setIsCreatingSchool(false);
+    }
+  };
+
   const handleAddSingle = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!singleName.trim()) {
@@ -496,53 +554,92 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
       return;
     }
 
-    const school = selectedSchool || schoolsList[0];
-    const rnd = Math.floor(1000 + Math.random() * 9000);
-    let codeToUse = '';
-    let roleTitle = '';
-    let displayName = singleName;
+    setIsSubmittingSingle(true);
+    try {
+      let school: School | null = null;
 
-    if (singleRole === 'teacher') {
-      codeToUse = `T-${singleGrade}-${singleSubject.code}-${school.prefix}-${rnd}`;
-      roleTitle = `معلم مادة ${singleSubject.nameAr} صف ${singleGrade}`;
-      displayName = `أ. ${singleName} - ${singleSubject.nameAr} صف ${singleGrade}`;
-    } else if (singleRole === 'principal') {
-      codeToUse = `M-${school.prefix}-${rnd}`;
-      roleTitle = 'مدير مدرسة';
-      displayName = singleName.replace(/صف\s*8|الصف\s*8/gi, '').trim();
-    } else if (singleRole === 'supervisor') {
-      codeToUse = `SUP-${school.prefix}-${rnd}`;
-      roleTitle = 'مشرف';
-      displayName = singleName.trim();
-    } else {
-      codeToUse = `STU-${singleGrade}-${school.prefix}-${rnd}`;
-      roleTitle = `طالب (الصف ${singleGrade})`;
-      displayName = singleName;
+      if (singleSchoolMode === 'new' || schoolsList.length === 0) {
+        const cleanNewName = singleNewSchoolName.trim();
+        if (!cleanNewName) {
+          setNotice({ type: 'error', text: 'يرجى كتابة اسم المدرسة الجديدة أو اختيار مدرسة من القائمة.' });
+          return;
+        }
+        const matchedExisting = schoolsList.find(
+          (s) => s.name.trim().toLowerCase() === cleanNewName.toLowerCase()
+        );
+        if (matchedExisting) {
+          school = matchedExisting;
+        } else {
+          school = await authService.addNewSchool(cleanNewName, singleNewSchoolCity.trim() || 'صنعاء');
+        }
+        setSelectedSchool(school);
+        setSingleSchoolMode('existing');
+        setSingleNewSchoolName('');
+      } else {
+        school = selectedSchool && schoolsList.some((s) => s.id === selectedSchool.id)
+          ? selectedSchool
+          : schoolsList[0] || null;
+      }
+
+      if (!school) {
+        setNotice({ type: 'error', text: 'يرجى اختيار المدرسة التابع لها أو إضافة مدرسة جديدة أولاً.' });
+        return;
+      }
+
+      const rnd = Math.floor(1000 + Math.random() * 9000);
+      let codeToUse = '';
+      let roleTitle = '';
+      let displayName = singleName.trim();
+
+      if (singleRole === 'teacher') {
+        codeToUse = `T-${singleGrade}-${singleSubject.code}-${school.prefix}-${rnd}`;
+        roleTitle = `معلم مادة ${singleSubject.nameAr} صف ${singleGrade}`;
+        displayName = `أ. ${singleName.trim()} - ${singleSubject.nameAr} صف ${singleGrade}`;
+      } else if (singleRole === 'principal') {
+        codeToUse = `M-${school.prefix}-${rnd}`;
+        roleTitle = 'مدير مدرسة';
+        displayName = singleName.replace(/صف\s*8|الصف\s*8/gi, '').trim();
+      } else if (singleRole === 'supervisor') {
+        codeToUse = `SUP-${school.prefix}-${rnd}`;
+        roleTitle = 'مشرف';
+        displayName = singleName.trim();
+      } else {
+        codeToUse = `STU-${singleGrade}-${school.prefix}-${rnd}`;
+        roleTitle = `طالب (الصف ${singleGrade})`;
+        displayName = singleName.trim();
+      }
+
+      await authService.addRegisteredCode({
+        code: codeToUse,
+        role: singleRole,
+        roleTitleAr: roleTitle,
+        assignedToName: displayName,
+        phone: singlePhone,
+        schoolId: school.id,
+        schoolName: school.name,
+        grade: singleRole === 'principal' || singleRole === 'supervisor' ? undefined : singleGrade,
+        class: singleRole === 'principal' || singleRole === 'supervisor' ? undefined : singleGrade,
+        subject: singleRole === 'teacher' ? singleSubject.nameAr : undefined,
+        isTest: false,
+        createdAt: new Date().toISOString(),
+        isActivated: false,
+        expiresAt: school.subscriptionExpiresAt || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+      });
+
+      setSingleName('');
+      setSinglePhone('');
+      setNotice({
+        type: 'success',
+        text: `🎉 تم إنشاء الكود بنجاح: ${codeToUse} للمستخدم "${displayName}" بمدرسة ${school.name}!`,
+      });
+    } catch (err: any) {
+      setNotice({
+        type: 'error',
+        text: `تعذر إنشاء الكود: ${err?.message || 'حدث خطأ أثناء الحفظ، حاول مرة أخرى.'}`,
+      });
+    } finally {
+      setIsSubmittingSingle(false);
     }
-
-    await authService.addRegisteredCode({
-      code: codeToUse,
-      role: singleRole,
-      roleTitleAr: roleTitle,
-      assignedToName: displayName,
-      phone: singlePhone,
-      schoolId: school.id,
-      schoolName: school.name,
-      grade: singleRole === 'principal' || singleRole === 'supervisor' ? undefined : singleGrade,
-      class: singleRole === 'principal' || singleRole === 'supervisor' ? undefined : singleGrade,
-      subject: singleRole === 'teacher' ? singleSubject.nameAr : undefined,
-      isTest: false,
-      createdAt: new Date().toISOString(),
-      isActivated: false,
-      expiresAt: school.subscriptionExpiresAt || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-    });
-
-    setSingleName('');
-    setSinglePhone('');
-    setNotice({
-      type: 'success',
-      text: `🎉 تم إنشاء الكود بنجاح: ${codeToUse} للمستخدم "${displayName}" بمدرسة ${school.name}!`,
-    });
   };
 
   const handleSaveDriveBook = async (e: React.FormEvent) => {
@@ -789,8 +886,16 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
                 </p>
               </div>
 
-              {/* Action Buttons: Export All Schools */}
+              {/* Action Buttons: Add School & Export All Schools */}
               <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowAddSchoolForm((prev) => !prev)}
+                  className="flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl bg-[#1E5AA8] hover:bg-[#1A3A5F] text-white text-xs font-bold transition shadow-xs cursor-pointer shrink-0"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>إضافة مدرسة جديدة</span>
+                </button>
                 <button
                   type="button"
                   onClick={handleExportAllSchoolsToExcel}
@@ -802,6 +907,51 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
                 </button>
               </div>
             </div>
+
+            {showAddSchoolForm && (
+              <form
+                onSubmit={handleCreateSchoolFromTab1}
+                className="p-4 rounded-xl bg-[#F4F8FC] border border-[#C6DCF2] grid grid-cols-1 sm:grid-cols-3 gap-3 items-end"
+              >
+                <div>
+                  <label className="block text-xs font-bold text-[#1A3A5F] mb-1">اسم المدرسة الجديدة:</label>
+                  <input
+                    type="text"
+                    value={tab1NewSchoolName}
+                    onChange={(e) => setTab1NewSchoolName(e.target.value)}
+                    placeholder="مثال: مدرسة النهضة الأساسية"
+                    className="w-full px-3 py-2 text-xs rounded-xl border border-gray-300 bg-white focus:outline-[#1E5AA8]"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-[#1A3A5F] mb-1">المدينة / المحافظة:</label>
+                  <input
+                    type="text"
+                    value={tab1NewSchoolCity}
+                    onChange={(e) => setTab1NewSchoolCity(e.target.value)}
+                    placeholder="صنعاء"
+                    className="w-full px-3 py-2 text-xs rounded-xl border border-gray-300 bg-white focus:outline-[#1E5AA8]"
+                  />
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="submit"
+                    disabled={isCreatingSchool}
+                    className="flex-1 py-2 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold transition cursor-pointer disabled:opacity-60"
+                  >
+                    {isCreatingSchool ? 'جاري الإضافة...' : 'حفظ المدرسة'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowAddSchoolForm(false)}
+                    className="py-2 px-3 rounded-xl bg-white border border-gray-300 text-gray-600 text-xs font-bold hover:bg-gray-50 cursor-pointer"
+                  >
+                    إلغاء
+                  </button>
+                </div>
+              </form>
+            )}
 
             {/* Approved Schools & Subscriptions Table */}
             <div className="overflow-x-auto rounded-xl border border-gray-200">
@@ -818,7 +968,14 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100 text-gray-700">
-                  {schoolsList.map((s, idx) => {
+                  {schoolsList.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="p-6 text-center text-gray-500 font-bold">
+                        لا توجد مدارس مسجلة حالياً — اضغط &quot;إضافة مدرسة جديدة&quot; أعلاه لإضافة أول مدرسة.
+                      </td>
+                    </tr>
+                  ) : (
+                    schoolsList.map((s, idx) => {
                     const codesCount = getSchoolCodesCount(s);
                     const daysLeft = getSchoolDaysRemaining(s);
                     const isRenewing = renewingSchoolId === s.id;
@@ -898,7 +1055,8 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
                         </td>
                       </tr>
                     );
-                  })}
+                  })
+                  )}
                 </tbody>
               </table>
             </div>
@@ -1226,22 +1384,81 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
               </select>
             </div>
 
-            <div>
-              <label className="block text-xs font-bold text-gray-700 mb-1">المدرسة التابع لها:</label>
-              <select
-                value={selectedSchool.id}
-                onChange={(e) => {
-                  const s = schoolsList.find((sc) => sc.id === e.target.value);
-                  if (s) setSelectedSchool(s);
-                }}
-                className="w-full p-2.5 text-xs rounded-xl border border-gray-300 focus:outline-[#1E5AA8]"
-              >
-                {schoolsList.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.name} [{s.prefix}]
-                  </option>
-                ))}
-              </select>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <label className="block text-xs font-bold text-gray-700">المدرسة التابع لها:</label>
+                {schoolsList.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setSingleSchoolMode((prev) => (prev === 'existing' ? 'new' : 'existing'))
+                    }
+                    className="text-[11px] font-bold text-[#1E5AA8] hover:underline flex items-center gap-1 cursor-pointer"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>
+                      {singleSchoolMode === 'new' ? 'اختيار من المدارس الحالية' : 'إضافة مدرسة جديدة'}
+                    </span>
+                  </button>
+                )}
+              </div>
+
+              {schoolsList.length > 0 && (
+                <select
+                  value={singleSchoolMode === 'new' ? '__NEW__' : selectedSchool?.id || ''}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    if (val === '__NEW__') {
+                      setSingleSchoolMode('new');
+                      return;
+                    }
+                    const s = schoolsList.find((sc) => sc.id === val);
+                    if (s) {
+                      setSelectedSchool(s);
+                      setSingleSchoolMode('existing');
+                    }
+                  }}
+                  className="w-full p-2.5 text-xs rounded-xl border border-gray-300 bg-white focus:outline-[#1E5AA8]"
+                >
+                  {!selectedSchool && <option value="">-- اختر المدرسة --</option>}
+                  {schoolsList.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name} [{s.prefix}]
+                    </option>
+                  ))}
+                  <option value="__NEW__">+ إضافة مدرسة جديدة...</option>
+                </select>
+              )}
+
+              {(singleSchoolMode === 'new' || schoolsList.length === 0) && (
+                <div className="p-3 rounded-xl bg-[#F4F8FC] border border-[#C6DCF2] grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <div>
+                    <label className="block text-[11px] font-bold text-[#1A3A5F] mb-1">
+                      اسم المدرسة الجديدة:
+                    </label>
+                    <input
+                      type="text"
+                      value={singleNewSchoolName}
+                      onChange={(e) => setSingleNewSchoolName(e.target.value)}
+                      placeholder="مثال: مدرسة السلام أو النور"
+                      className="w-full p-2 text-xs rounded-lg border border-gray-300 bg-white focus:outline-[#1E5AA8]"
+                      required={singleSchoolMode === 'new' || schoolsList.length === 0}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold text-[#1A3A5F] mb-1">
+                      المدينة / المحافظة:
+                    </label>
+                    <input
+                      type="text"
+                      value={singleNewSchoolCity}
+                      onChange={(e) => setSingleNewSchoolCity(e.target.value)}
+                      placeholder="صنعاء"
+                      className="w-full p-2 text-xs rounded-lg border border-gray-300 bg-white focus:outline-[#1E5AA8]"
+                    />
+                  </div>
+                </div>
+              )}
             </div>
 
             <div>
@@ -1318,9 +1535,10 @@ export const SystemAdminDashboard: React.FC<SystemAdminDashboardProps> = ({
 
             <button
               type="submit"
-              className="w-full py-3 rounded-xl bg-[#1E5AA8] hover:bg-[#1A3A5F] text-white text-xs font-bold shadow transition cursor-pointer"
+              disabled={isSubmittingSingle}
+              className="w-full py-3 rounded-xl bg-[#1E5AA8] hover:bg-[#1A3A5F] disabled:opacity-60 text-white text-xs font-bold shadow transition cursor-pointer"
             >
-              توليد الكود وحفظه
+              {isSubmittingSingle ? 'جاري توليد الكود وحفظه...' : 'توليد الكود وحفظه'}
             </button>
           </form>
         </div>

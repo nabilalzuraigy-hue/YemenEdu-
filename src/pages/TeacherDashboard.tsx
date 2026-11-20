@@ -601,8 +601,15 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
   const safeTeacherKey = (session.code || 'teacher').replace(/[^a-zA-Z0-9_-]/g, '_');
   const quotaDocId = `${safeSchoolKey}_${safeTeacherKey}_${todayDateKey}`;
   const draftStorageKey = `lesson_draft_${quotaDocId}`;
+  const localQuotaStorageKey = `lesson_quota_used_${quotaDocId}`;
 
-  const [dailyQuotaUsed, setDailyQuotaUsed] = useState<boolean>(false);
+  const [dailyQuotaUsed, setDailyQuotaUsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(`lesson_quota_used_${safeSchoolKey}_${safeTeacherKey}_${getLocalDateKey()}`) === '1';
+    } catch {
+      return false;
+    }
+  });
   const [dailyQuotaLoading, setDailyQuotaLoading] = useState<boolean>(true);
   const [questionDistribution, setQuestionDistribution] = useState<{
     mcq: number;
@@ -613,6 +620,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
   const [sessionLessonPages, setSessionLessonPages] = useState<PreparedLessonPage[]>([]);
   const [isConvertingPages, setIsConvertingPages] = useState<boolean>(false);
   const [isPreparingQuestions, setIsPreparingQuestions] = useState<boolean>(false);
+  const isPreparingQuestionsRef = useRef<boolean>(false);
   const [lessonFlowError, setLessonFlowError] = useState<string | null>(null);
   const [lessonLimitNotice, setLessonLimitNotice] = useState<string | null>(null);
   const [preparedQuestions, setPreparedQuestions] = useState<DraftLessonQuestion[]>(() => {
@@ -725,57 +733,99 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
   const QUOTA_EXHAUSTED_MESSAGE =
     'تم تجهيز أسئلة اليوم، عدد الأسئلة لليوم الواحد لا يتجاوز 5 أسئلة، يمكنك تجهيز أسئلة جديدة غداً';
 
+  const raceWithTimeout = <T,>(promise: Promise<T>, ms = 2500): Promise<T> => {
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('timeout')), ms);
+      promise.then(
+        (val) => {
+          clearTimeout(timer);
+          resolve(val);
+        },
+        (err) => {
+          clearTimeout(timer);
+          reject(err);
+        }
+      );
+    });
+  };
+
   const verifyQuotaAvailable = async (): Promise<boolean> => {
-    if (dailyQuotaUsed) {
+    let localUsed = false;
+    try {
+      localUsed = localStorage.getItem(localQuotaStorageKey) === '1';
+    } catch {
+      // ignore storage errors
+    }
+    if (dailyQuotaUsed || localUsed) {
+      setDailyQuotaUsed(true);
       setLessonFlowError(QUOTA_EXHAUSTED_MESSAGE);
       return false;
     }
     try {
-      const snap = await getDoc(doc(db, 'teacher_daily_quotas', quotaDocId));
+      const snap = await raceWithTimeout(
+        getDoc(doc(db, 'teacher_daily_quotas', quotaDocId)),
+        2500
+      );
       if (snap.exists() && Boolean(snap.data()?.used)) {
         setDailyQuotaUsed(true);
+        try {
+          localStorage.setItem(localQuotaStorageKey, '1');
+        } catch {
+          // ignore
+        }
         setLessonFlowError(QUOTA_EXHAUSTED_MESSAGE);
         return false;
       }
     } catch {
-      // fallback to reactive state if offline
+      // fallback to reactive/local state if Firestore WebChannel is slow or offline
     }
     return true;
   };
 
   const prepareQuestionsFromPages = async (
     pagesToProcess: PreparedLessonPage[],
-    options?: { isRegenerate?: boolean; previousQuestionTexts?: string[] }
+    options?: { isRegenerate?: boolean; previousQuestionTexts?: string[]; skipQuotaCheck?: boolean }
   ) => {
-    if (pagesToProcess.length === 0 || isPreparingQuestions) return;
+    if (pagesToProcess.length === 0 || isPreparingQuestionsRef.current) return;
 
-    const isRegenerate = Boolean(options?.isRegenerate);
-    if (!isRegenerate) {
-      const allowed = await verifyQuotaAvailable();
-      if (!allowed) {
-        setQueuedLessonPages([]);
-        return;
-      }
-    }
-
+    // Show waiting screen synchronously before any async operation
+    isPreparingQuestionsRef.current = true;
     setLessonFlowError(null);
     setIsPreparingQuestions(true);
 
+    const isRegenerate = Boolean(options?.isRegenerate);
     try {
-      const res = await fetch('/api/lesson/prepare-questions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          images: pagesToProcess.slice(0, MAX_LESSON_PAGES).map((p) => ({
-            base64: p.base64,
-            mimeType: p.mimeType,
-          })),
-          grade: teacherGrade,
-          subject: teacherSubject,
-          distribution: questionDistribution,
-          previousQuestions: options?.previousQuestionTexts || [],
-        }),
-      });
+      if (!isRegenerate && !options?.skipQuotaCheck) {
+        const allowed = await verifyQuotaAvailable();
+        if (!allowed) {
+          setQueuedLessonPages([]);
+          setLessonLimitNotice(null);
+          return;
+        }
+      }
+
+      const controller = new AbortController();
+      const fetchTimer = setTimeout(() => controller.abort(), 45000);
+      let res: Response;
+      try {
+        res = await fetch('/api/lesson/prepare-questions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
+          body: JSON.stringify({
+            images: pagesToProcess.slice(0, MAX_LESSON_PAGES).map((p) => ({
+              base64: p.base64,
+              mimeType: p.mimeType,
+            })),
+            grade: teacherGrade,
+            subject: teacherSubject,
+            distribution: questionDistribution,
+            previousQuestions: options?.previousQuestionTexts || [],
+          }),
+        });
+      } finally {
+        clearTimeout(fetchTimer);
+      }
 
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -807,32 +857,45 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
         points: 5,
       }));
 
-      // Lock daily quota for today (on regenerate, keeps the SAME day quota without adding a new day)
-      await setDoc(
-        doc(db, 'teacher_daily_quotas', quotaDocId),
-        cleanFirestorePayload({
-          id: quotaDocId,
-          schoolId: teacherSchoolId,
-          teacherCode: session.code,
-          teacherName: session.name,
-          date: todayDateKey,
-          used: true,
-          questionsCount: formattedDrafts.length,
-          updatedAt: Date.now(),
-        }),
-        { merge: true }
-      );
-
+      // Lock daily quota locally + in Firestore (bounded by timeout so UI never hangs)
       setDailyQuotaUsed(true);
+      try {
+        localStorage.setItem(localQuotaStorageKey, '1');
+      } catch {
+        // ignore
+      }
+      await raceWithTimeout(
+        setDoc(
+          doc(db, 'teacher_daily_quotas', quotaDocId),
+          cleanFirestorePayload({
+            id: quotaDocId,
+            schoolId: teacherSchoolId,
+            teacherCode: session.code,
+            teacherName: session.name,
+            date: todayDateKey,
+            used: true,
+            questionsCount: formattedDrafts.length,
+            updatedAt: Date.now(),
+          }),
+          { merge: true }
+        ),
+        3500
+      ).catch(() => {});
+
       setSessionLessonPages(pagesToProcess.slice(0, MAX_LESSON_PAGES));
       setPreparedQuestions(formattedDrafts);
       setQueuedLessonPages([]);
       setLessonLimitNotice(null);
-    } catch (err) {
-      setLessonFlowError(
-        err instanceof Error ? err.message : 'تعذر تجهيز الأسئلة حالياً، يرجى المحاولة مرة أخرى.'
-      );
+    } catch (err: any) {
+      if (err?.name === 'AbortError') {
+        setLessonFlowError('استغرق تجهيز الأسئلة وقتاً أطول من المعتاد، يرجى الضغط على "جهّز الأسئلة الآن" للمحاولة مرة أخرى.');
+      } else {
+        setLessonFlowError(
+          err instanceof Error ? err.message : 'تعذر تجهيز الأسئلة حالياً، يرجى المحاولة مرة أخرى.'
+        );
+      }
     } finally {
+      isPreparingQuestionsRef.current = false;
       setIsPreparingQuestions(false);
     }
   };
@@ -880,12 +943,22 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
 
   const handleTriggerLessonUpload = async (inputRef: React.RefObject<HTMLInputElement | null>) => {
     setLessonFlowError(null);
-    if (isPreparingQuestions || isConvertingPages) return;
-    const allowed = await verifyQuotaAvailable();
-    if (!allowed) return;
+    if (isPreparingQuestionsRef.current || isPreparingQuestions || isConvertingPages) return;
     if (queuedLessonPages.length >= MAX_LESSON_PAGES) {
       setLessonLimitNotice('وصلت للحد الأقصى، سيتم تجهيز الأسئلة الآن');
       await prepareQuestionsFromPages(queuedLessonPages.slice(0, MAX_LESSON_PAGES));
+      return;
+    }
+    // Check fast state/local quota synchronously so Android file/camera picker opens directly inside user gesture
+    let localUsed = false;
+    try {
+      localUsed = localStorage.getItem(localQuotaStorageKey) === '1';
+    } catch {
+      // ignore
+    }
+    if (dailyQuotaUsed || localUsed) {
+      setDailyQuotaUsed(true);
+      setLessonFlowError(QUOTA_EXHAUSTED_MESSAGE);
       return;
     }
     inputRef.current?.click();
@@ -918,7 +991,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
       if (mergedPages.length >= MAX_LESSON_PAGES || result.hitLimit) {
         setLessonLimitNotice('وصلت للحد الأقصى، سيتم تجهيز الأسئلة الآن');
         setIsConvertingPages(false);
-        await prepareQuestionsFromPages(mergedPages);
+        await prepareQuestionsFromPages(mergedPages, { skipQuotaCheck: true });
         return;
       }
     } catch (err) {
@@ -1641,8 +1714,8 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
                 </div>
               )}
 
-              {/* Multi-Page Confirmation Prompt ("هل لديك صورة أخرى أو ملف آخر لنفس الدرس؟") */}
-              {!isConvertingPages && !isPreparingQuestions && queuedLessonPages.length > 0 && queuedLessonPages.length < MAX_LESSON_PAGES && (
+              {/* Multi-Page Confirmation Prompt & Retryable Queue (kept visible at 5 pages too if not yet prepared) */}
+              {!isConvertingPages && !isPreparingQuestions && queuedLessonPages.length > 0 && (
                 <div className="p-4 sm:p-5 rounded-2xl bg-[#F4F8FC] border-2 border-[#C6DCF2] space-y-4">
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-xs font-black text-[#1A3A5F] flex items-center gap-2">
@@ -1690,27 +1763,35 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
                     ))}
                   </div>
 
-                  {/* Required Confirmation Prompt & 2 Buttons */}
+                  {/* Required Confirmation Prompt & Action Buttons */}
                   <div className="bg-white rounded-xl p-4 border border-[#DCE7F3] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                     <p className="text-sm font-black text-[#1A3A5F]">
-                      هل لديك صورة أخرى أو ملف آخر لنفس الدرس؟
+                      {queuedLessonPages.length < MAX_LESSON_PAGES
+                        ? 'هل لديك صورة أخرى أو ملف آخر لنفس الدرس؟'
+                        : 'تم إرفاق 5 صفحات (الحد الأقصى للدرس)، يمكنك التجهيز الآن:'}
                     </p>
                     <div className="flex flex-wrap items-center gap-2.5">
+                      {queuedLessonPages.length < MAX_LESSON_PAGES && (
+                        <button
+                          type="button"
+                          onClick={() => handleTriggerLessonUpload(lessonAddMoreInputRef)}
+                          className="px-4 py-2.5 rounded-xl text-xs font-black bg-[#EEF5FC] hover:bg-[#dcebfa] text-[#1F5AAA] border border-[#9BBEDF] flex items-center gap-1.5 transition cursor-pointer"
+                        >
+                          <Plus className="w-4 h-4" />
+                          <span>+ أضف صورة أخرى</span>
+                        </button>
+                      )}
                       <button
                         type="button"
-                        onClick={() => handleTriggerLessonUpload(lessonAddMoreInputRef)}
-                        className="px-4 py-2.5 rounded-xl text-xs font-black bg-[#EEF5FC] hover:bg-[#dcebfa] text-[#1F5AAA] border border-[#9BBEDF] flex items-center gap-1.5 transition cursor-pointer"
-                      >
-                        <Plus className="w-4 h-4" />
-                        <span>+ أضف صورة أخرى</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => prepareQuestionsFromPages(queuedLessonPages)}
+                        onClick={() => prepareQuestionsFromPages(queuedLessonPages, { skipQuotaCheck: true })}
                         className="px-5 py-2.5 rounded-xl text-xs font-black bg-emerald-600 hover:bg-emerald-700 text-white border border-emerald-700 flex items-center gap-1.5 transition shadow-sm cursor-pointer"
                       >
                         <CheckCircle className="w-4 h-4" />
-                        <span>لا، جهّز الأسئلة الآن</span>
+                        <span>
+                          {queuedLessonPages.length < MAX_LESSON_PAGES
+                            ? 'لا، جهّز الأسئلة الآن'
+                            : 'جهّز الأسئلة الآن'}
+                        </span>
                       </button>
                     </div>
                   </div>

@@ -34,51 +34,98 @@ export function compressImageFile(
   assertImageOnlyFile(file);
 
   const maxDimension = Math.min(1280, Math.max(320, options?.maxDimension ?? 1280));
-  const rawQuality = options?.quality ?? 0.75;
+  const rawQuality = options?.quality ?? 0.74;
   const quality = Math.min(0.8, Math.max(0.7, rawQuality));
 
+  const processLoadedImage = (
+    img: HTMLImageElement,
+    resolve: (val: CompressedImageResult) => void,
+    reject: (reason?: unknown) => void,
+    cleanup?: () => void
+  ) => {
+    try {
+      let width = img.naturalWidth || img.width || 1280;
+      let height = img.naturalHeight || img.height || 720;
+
+      if (width > maxDimension || height > maxDimension) {
+        if (width >= height) {
+          height = Math.max(1, Math.round((height * maxDimension) / width));
+          width = maxDimension;
+        } else {
+          width = Math.max(1, Math.round((width * maxDimension) / height));
+          height = maxDimension;
+        }
+      }
+
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        cleanup?.();
+        reject(new Error('تعذر تهيئة ضغط الصورة على هذا المتصفح.'));
+        return;
+      }
+
+      // Fill white background before drawing in case source PNG/WebP has transparency
+      ctx.fillStyle = '#FFFFFF';
+      ctx.fillRect(0, 0, width, height);
+      ctx.drawImage(img, 0, 0, width, height);
+
+      const dataUrl = canvas.toDataURL('image/jpeg', quality);
+      const base64 = dataUrl.split(',')[1] || '';
+
+      // Release canvas backing memory immediately (important on Android Chrome for 5 camera photos)
+      canvas.width = 0;
+      canvas.height = 0;
+      cleanup?.();
+
+      resolve({
+        dataUrl,
+        base64,
+        mimeType: 'image/jpeg',
+        width,
+        height,
+      });
+    } catch (err) {
+      cleanup?.();
+      reject(err instanceof Error ? err : new Error('تعذر ضغط الصورة المختارة.'));
+    }
+  };
+
   return new Promise((resolve, reject) => {
+    if (typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
+      const objectUrl = URL.createObjectURL(file);
+      const img = new Image();
+      const revoke = () => {
+        try {
+          URL.revokeObjectURL(objectUrl);
+        } catch {
+          // ignore
+        }
+      };
+      img.onload = () => processLoadedImage(img, resolve, reject, revoke);
+      img.onerror = () => {
+        revoke();
+        // Fallback to FileReader if blob URL fails
+        const reader = new FileReader();
+        reader.onload = (event) => {
+          const fallbackImg = new Image();
+          fallbackImg.onload = () => processLoadedImage(fallbackImg, resolve, reject);
+          fallbackImg.onerror = () => reject(new Error('تعذر قراءة ملف الصورة، يرجى اختيار صورة صالحة.'));
+          fallbackImg.src = String(event.target?.result || '');
+        };
+        reader.onerror = () => reject(new Error('تعذر فتح ملف الصورة.'));
+        reader.readAsDataURL(file);
+      };
+      img.src = objectUrl;
+      return;
+    }
+
     const reader = new FileReader();
     reader.onload = (event) => {
       const img = new Image();
-      img.onload = () => {
-        let width = img.width || 1280;
-        let height = img.height || 720;
-
-        if (width > maxDimension || height > maxDimension) {
-          if (width >= height) {
-            height = Math.max(1, Math.round((height * maxDimension) / width));
-            width = maxDimension;
-          } else {
-            width = Math.max(1, Math.round((width * maxDimension) / height));
-            height = maxDimension;
-          }
-        }
-
-        const canvas = document.createElement('canvas');
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) {
-          reject(new Error('تعذر تهيئة ضغط الصورة على هذا المتصفح.'));
-          return;
-        }
-
-        // Fill white background before drawing in case source PNG/WebP has transparency
-        ctx.fillStyle = '#FFFFFF';
-        ctx.fillRect(0, 0, width, height);
-        ctx.drawImage(img, 0, 0, width, height);
-
-        const dataUrl = canvas.toDataURL('image/jpeg', quality);
-        const base64 = dataUrl.split(',')[1] || '';
-        resolve({
-          dataUrl,
-          base64,
-          mimeType: 'image/jpeg',
-          width,
-          height,
-        });
-      };
+      img.onload = () => processLoadedImage(img, resolve, reject);
       img.onerror = () => reject(new Error('تعذر قراءة ملف الصورة، يرجى اختيار صورة صالحة.'));
       img.src = String(event.target?.result || '');
     };

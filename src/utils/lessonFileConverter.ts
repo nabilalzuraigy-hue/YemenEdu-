@@ -232,10 +232,14 @@ export async function convertFilesToLessonPages(
       throw new Error('ممنوع رفع الفيديو، يُسمح بالصور أو ملفات PDF و Word فقط.');
     }
 
-    if (mime.startsWith('image/') || IMAGE_EXT_RE.test(name)) {
+    if (
+      mime.startsWith('image/') ||
+      IMAGE_EXT_RE.test(name) ||
+      (!mime && !name.endsWith('.pdf') && !name.endsWith('.docx') && !name.endsWith('.doc'))
+    ) {
       const compressed = await compressImageFile(file, {
         maxDimension: 1280,
-        quality: 0.75,
+        quality: 0.72,
       });
       collected.push({
         id: `img-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
