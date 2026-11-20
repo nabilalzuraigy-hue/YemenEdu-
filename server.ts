@@ -3,13 +3,14 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = Number(process.env.PORT) || 3000;
 const MODEL_ID = 'gemini-4-hydrogen';
+const FALLBACK_MODEL_ID = 'gemini-3.1-flash-lite';
 
 function extractBase64Image(rawInput: string, fallbackMime = 'image/jpeg'): { data: string; mimeType: string } {
   const trimmed = (rawInput || '').trim();
@@ -34,6 +35,7 @@ function createGeminiClient(): GoogleGenAI {
   return new GoogleGenAI({
     apiKey,
     httpOptions: {
+      timeout: 12000,
       headers: {
         'User-Agent': 'aistudio-build',
       },
@@ -46,25 +48,49 @@ function isTransientGeminiError(err: unknown): boolean {
   const lower = msg.toLowerCase();
   return (
     lower.includes('503') ||
+    lower.includes('504') ||
+    lower.includes('deadline_exceeded') ||
     lower.includes('unavailable') ||
     lower.includes('high demand') ||
     lower.includes('429') ||
     lower.includes('resource_exhausted') ||
     lower.includes('overloaded') ||
+    lower.includes('internal') ||
     lower.includes('econnreset') ||
     lower.includes('etimedout') ||
+    lower.includes('timeout') ||
+    lower.includes('aborted') ||
     lower.includes('fetch failed')
   );
 }
 
 function formatGeminiErrorMessage(err: unknown, fallbackArabic: string): string {
   const raw = err instanceof Error ? err.message : String(err || '');
-  const lower = raw.toLowerCase();
+  let extractedMsg = raw;
+  let extractedStatus = '';
+  let extractedCode: number | string = '';
+
+  if (raw.trim().startsWith('{')) {
+    try {
+      const parsed = JSON.parse(raw);
+      const inner = parsed?.error || parsed;
+      extractedMsg = String(inner?.message || raw);
+      extractedStatus = String(inner?.status || '');
+      extractedCode = inner?.code ?? '';
+    } catch {
+      // keep raw
+    }
+  }
+
+  const lower = `${raw} ${extractedMsg} ${extractedStatus} ${extractedCode}`.toLowerCase();
   if (lower.includes('gemini_api_key') || lower.includes('مفتاح gemini')) {
     return 'مفتاح GEMINI_API_KEY غير مضاف أو غير نشط في Settings > Secrets.';
   }
   if (lower.includes('api_key_invalid') || lower.includes('permission_denied') || lower.includes('403') || lower.includes('401')) {
     return 'تعذر التحقق من مفتاح Gemini API؛ يرجى مراجعة المفتاح في Settings > Secrets.';
+  }
+  if (lower.includes('timeout') || lower.includes('aborted') || lower.includes('etimedout') || lower.includes('504') || lower.includes('deadline_exceeded')) {
+    return 'استغرق الاتصال بخادم Gemini وقتاً أطول من المعتاد، يرجى المحاولة مرة أخرى.';
   }
   if (lower.includes('503') || lower.includes('unavailable') || lower.includes('high demand') || lower.includes('overloaded')) {
     return 'خادم الذكاء الاصطناعي مزدحم مؤقتاً الآن، يرجى المحاولة مرة أخرى بعد لحظات.';
@@ -72,24 +98,45 @@ function formatGeminiErrorMessage(err: unknown, fallbackArabic: string): string 
   if (lower.includes('429') || lower.includes('resource_exhausted') || lower.includes('quota')) {
     return 'تم تجاوز حد الطلبات المؤقت لمفتاح Gemini API، يرجى الانتظار قليلاً ثم المحاولة.';
   }
-  return raw && !raw.startsWith('{') ? raw : fallbackArabic;
+  if (extractedMsg && !extractedMsg.startsWith('{')) {
+    return `${fallbackArabic}: ${extractedMsg}`;
+  }
+  return fallbackArabic;
 }
 
 async function generateContentWithRetry(
   ai: GoogleGenAI,
   params: Parameters<GoogleGenAI['models']['generateContent']>[0],
-  maxAttempts = 3
+  maxAttempts = 2
 ) {
   let lastErr: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      return await ai.models.generateContent(params);
+      const useFallback = attempt > 1 && params.model === MODEL_ID;
+      const attemptParams = useFallback
+        ? {
+            ...params,
+            model: FALLBACK_MODEL_ID,
+            config: params.config
+              ? {
+                  ...params.config,
+                  thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
+                }
+              : undefined,
+          }
+        : params;
+      return await ai.models.generateContent(attemptParams);
     } catch (err) {
       lastErr = err;
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.warn(`[Gemini attempt ${attempt}/${maxAttempts} failed]:`, errMsg);
       if (!isTransientGeminiError(err) || attempt >= maxAttempts) {
         throw err;
       }
-      const delayMs = Math.round(700 * Math.pow(2, attempt - 1) + Math.random() * 250);
+      const isQuotaBurst = errMsg.toLowerCase().includes('429') || errMsg.toLowerCase().includes('resource_exhausted');
+      const delayMs = isQuotaBurst
+        ? 1500
+        : Math.round(500 * Math.pow(2, attempt - 1) + Math.random() * 200);
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
   }
@@ -215,6 +262,7 @@ async function startServer() {
           },
         ],
         config: {
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,
@@ -305,6 +353,7 @@ async function startServer() {
           },
         ],
         config: {
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,
@@ -426,6 +475,7 @@ ${transcript}
 2) صغ من النص الأصلي تقريراً/وصفاً رسمياً مرتباً ومختصراً باللغة العربية الفصحى السليمة في حقل formalReport (بدون حشو أو مبالغة أو اختلاق وقائع غير موجودة في كلام المشرف، وبنقاط منظمة أو فقرة مهنية قصيرة واضحة).
 أعد النتيجة بصيغة JSON فقط.`,
           config: {
+            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
             responseMimeType: 'application/json',
             responseSchema: {
               type: Type.OBJECT,
@@ -464,6 +514,7 @@ ${transcript}
           ],
         },
         config: {
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,
@@ -553,6 +604,7 @@ ${transcript}
           ],
         },
         config: {
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,
