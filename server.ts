@@ -29,7 +29,7 @@ function extractBase64Image(rawInput: string, fallbackMime = 'image/jpeg'): { da
 function createGeminiClient(): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    throw new Error('GEMINI_API_KEY is not configured on the server.');
+    throw new Error('مفتاح Gemini غير مهيأ على الخادم في Settings > Secrets.');
   }
   return new GoogleGenAI({
     apiKey,
@@ -39,6 +39,61 @@ function createGeminiClient(): GoogleGenAI {
       },
     },
   });
+}
+
+function isTransientGeminiError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err || '');
+  const lower = msg.toLowerCase();
+  return (
+    lower.includes('503') ||
+    lower.includes('unavailable') ||
+    lower.includes('high demand') ||
+    lower.includes('429') ||
+    lower.includes('resource_exhausted') ||
+    lower.includes('overloaded') ||
+    lower.includes('econnreset') ||
+    lower.includes('etimedout') ||
+    lower.includes('fetch failed')
+  );
+}
+
+function formatGeminiErrorMessage(err: unknown, fallbackArabic: string): string {
+  const raw = err instanceof Error ? err.message : String(err || '');
+  const lower = raw.toLowerCase();
+  if (lower.includes('gemini_api_key') || lower.includes('مفتاح gemini')) {
+    return 'مفتاح GEMINI_API_KEY غير مضاف أو غير نشط في Settings > Secrets.';
+  }
+  if (lower.includes('api_key_invalid') || lower.includes('permission_denied') || lower.includes('403') || lower.includes('401')) {
+    return 'تعذر التحقق من مفتاح Gemini API؛ يرجى مراجعة المفتاح في Settings > Secrets.';
+  }
+  if (lower.includes('503') || lower.includes('unavailable') || lower.includes('high demand') || lower.includes('overloaded')) {
+    return 'خادم الذكاء الاصطناعي مزدحم مؤقتاً الآن، يرجى المحاولة مرة أخرى بعد لحظات.';
+  }
+  if (lower.includes('429') || lower.includes('resource_exhausted') || lower.includes('quota')) {
+    return 'تم تجاوز حد الطلبات المؤقت لمفتاح Gemini API، يرجى الانتظار قليلاً ثم المحاولة.';
+  }
+  return raw && !raw.startsWith('{') ? raw : fallbackArabic;
+}
+
+async function generateContentWithRetry(
+  ai: GoogleGenAI,
+  params: Parameters<GoogleGenAI['models']['generateContent']>[0],
+  maxAttempts = 3
+) {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await ai.models.generateContent(params);
+    } catch (err) {
+      lastErr = err;
+      if (!isTransientGeminiError(err) || attempt >= maxAttempts) {
+        throw err;
+      }
+      const delayMs = Math.round(700 * Math.pow(2, attempt - 1) + Math.random() * 250);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  throw lastErr;
 }
 
 const VALID_DAYS = ['السبت', 'الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء'] as const;
@@ -104,8 +159,22 @@ async function startServer() {
   const app = express();
   app.use(express.json({ limit: '20mb' }));
 
+  app.use('/api', (req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    if (req.method === 'OPTIONS') {
+      res.sendStatus(204);
+      return;
+    }
+    next();
+  });
+
   app.get('/api/health', (_req, res) => {
-    res.json({ ok: true });
+    res.json({
+      ok: true,
+      geminiConfigured: Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim()),
+    });
   });
 
   app.post('/api/gemini/parse-attendance', async (req, res) => {
@@ -119,7 +188,7 @@ async function startServer() {
       const ai = createGeminiClient();
       const img = extractBase64Image(imageBase64, mimeType || 'image/jpeg');
 
-      const response = await ai.models.generateContent({
+      const response = await generateContentWithRetry(ai, {
         model: MODEL_ID,
         contents: [
           {
@@ -192,8 +261,8 @@ async function startServer() {
         sheetNotes: typeof parsed.sheetNotes === 'string' ? parsed.sheetNotes : '',
       });
     } catch (error) {
-      const msg = error instanceof Error ? error.message : 'تعذر تحليل صورة كشف الحضور';
-      console.error('[Gemini Attendance Parse Error]:', msg);
+      const msg = formatGeminiErrorMessage(error, 'تعذر تحليل صورة كشف الحضور');
+      console.error('[Gemini Attendance Parse Error]:', error);
       res.status(500).json({ error: msg });
     }
   });
@@ -209,7 +278,7 @@ async function startServer() {
       const ai = createGeminiClient();
       const img = extractBase64Image(imageBase64, mimeType || 'image/jpeg');
 
-      const response = await ai.models.generateContent({
+      const response = await generateContentWithRetry(ai, {
         model: MODEL_ID,
         contents: [
           {
@@ -275,8 +344,8 @@ async function startServer() {
 
       res.json({ entries });
     } catch (error) {
-      const msg = error instanceof Error ? error.message : 'تعذر تحليل صورة جدول الحصص';
-      console.error('[Gemini Schedule Parse Error]:', msg);
+      const msg = formatGeminiErrorMessage(error, 'تعذر تحليل صورة جدول الحصص');
+      console.error('[Gemini Schedule Parse Error]:', error);
       res.status(500).json({ error: msg });
     }
   });
@@ -324,7 +393,7 @@ async function startServer() {
       // Step 1: Transcribe audio cleanly using gemini-3.5-transcribe (fallback to gemini-4-hydrogen if container format fails)
       let transcript = '';
       try {
-        const transcribeRes = await ai.models.generateContent({
+        const transcribeRes = await generateContentWithRetry(ai, {
           model: 'gemini-3.5-transcribe',
           contents: {
             parts: [
@@ -334,7 +403,7 @@ async function startServer() {
               },
             ],
           },
-        });
+        }, 2);
         transcript = (transcribeRes.text || '').trim();
       } catch (transcribeErr) {
         console.warn('[Gemini Transcribe fallback to 4-hydrogen]:', transcribeErr);
@@ -343,7 +412,7 @@ async function startServer() {
       const contextDesc = `التصنيف: ${category || 'تقرير'} (${subType || 'عام'})، الصف: ${targetGrade || 'الكل'}، الفصل: ${targetClass || 'الكل'}، التاريخ: ${activityDate || ''}`;
 
       if (transcript) {
-        const formalRes = await ai.models.generateContent({
+        const formalRes = await generateContentWithRetry(ai, {
           model: MODEL_ID,
           contents: `أنت سكرتير إداري وتربوي محترف في مدرسة يمنية.
 سياق المنشور: ${contextDesc}
@@ -379,7 +448,7 @@ ${transcript}
       }
 
       // Single-step multimodal fallback if transcription model didn't extract text
-      const fallbackRes = await ai.models.generateContent({
+      const fallbackRes = await generateContentWithRetry(ai, {
         model: MODEL_ID,
         contents: {
           parts: [
@@ -415,8 +484,8 @@ ${transcript}
         formalReport: String(parsedFallback.formalReport || '').trim(),
       });
     } catch (error) {
-      const msg = error instanceof Error ? error.message : 'تعذر تحويل التسجيل الصوتي إلى تقرير رسمي';
-      console.error('[Gemini Voice Report Error]:', msg);
+      const msg = formatGeminiErrorMessage(error, 'تعذر تحويل التسجيل الصوتي إلى تقرير رسمي');
+      console.error('[Gemini Voice Report Error]:', error);
       res.status(500).json({ error: msg });
     }
   });
@@ -461,7 +530,7 @@ ${transcript}
           };
         });
 
-      const response = await ai.models.generateContent({
+      const response = await generateContentWithRetry(ai, {
         model: MODEL_ID,
         contents: {
           parts: [
@@ -502,8 +571,8 @@ ${transcript}
         formalReport: String(parsed.formalReport || '').trim(),
       });
     } catch (error) {
-      const msg = error instanceof Error ? error.message : 'تعذر صياغة التقرير من الصورة';
-      console.error('[Gemini Image Report Error]:', msg);
+      const msg = formatGeminiErrorMessage(error, 'تعذر صياغة التقرير من الصورة');
+      console.error('[Gemini Image Report Error]:', error);
       res.status(500).json({ error: msg });
     }
   });
@@ -518,8 +587,17 @@ ${transcript}
   } else {
     const distPath = path.resolve(__dirname, 'dist');
     if (fs.existsSync(distPath)) {
-      app.use(express.static(distPath));
+      app.use(
+        express.static(distPath, {
+          setHeaders: (res, filePath) => {
+            if (filePath.endsWith('.html') || filePath.endsWith('sw.js')) {
+              res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+            }
+          },
+        })
+      );
       app.get('*', (_req, res) => {
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
         res.sendFile(path.join(distPath, 'index.html'));
       });
     }

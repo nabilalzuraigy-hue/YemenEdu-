@@ -62,6 +62,13 @@ import { formatArabicSchoolName } from '../utils/schoolDisplay';
 import { compressImageFile, recompressDataUrl } from '../utils/imageCompression';
 import { playGentleNotificationSound } from '../services/soundUtils';
 
+const resolveGeminiApiUrl = (apiPath: string): string => {
+  const base = String((import.meta as any).env?.VITE_GEMINI_BACKEND_URL || '')
+    .trim()
+    .replace(/\/$/, '');
+  return `${base}${apiPath}`;
+};
+
 interface SupervisorDashboardProps {
   session: UserSession;
 }
@@ -411,7 +418,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
         appDataService.uploadSupervisorAudio(schoolId, audioBlob),
       ]);
 
-      const response = await fetch('/api/gemini/draft-report-from-voice', {
+      const response = await fetch(resolveGeminiApiUrl('/api/gemini/draft-report-from-voice'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -571,7 +578,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
     setHasReviewedDraft(false);
 
     try {
-      const response = await fetch('/api/gemini/draft-report-from-image', {
+      const response = await fetch(resolveGeminiApiUrl('/api/gemini/draft-report-from-image'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -766,7 +773,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
       });
       setAttImagePreview(dataUrl);
 
-      const response = await fetch('/api/gemini/parse-attendance', {
+      const response = await fetch(resolveGeminiApiUrl('/api/gemini/parse-attendance'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -890,7 +897,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
       });
       setSchedImagePreview(dataUrl);
 
-      const response = await fetch('/api/gemini/parse-schedule', {
+      const response = await fetch(resolveGeminiApiUrl('/api/gemini/parse-schedule'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ imageBase64: base64, mimeType }),
