@@ -4,6 +4,7 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
+import { shuffleAndBalanceQuestions, type LessonQuestionKind } from './src/utils/questionShuffle.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -626,6 +627,245 @@ ${transcript}
       const msg = formatGeminiErrorMessage(error, 'تعذر صياغة التقرير من الصورة');
       console.error('[Gemini Image Report Error]:', error);
       res.status(500).json({ error: msg });
+    }
+  });
+
+  // Teacher Lesson Question Preparation (Strictly gemini-3.1-flash-lite, max 5 compressed page images, customizable 5-question distribution + anti-cheat shuffling)
+  app.post('/api/lesson/prepare-questions', async (req, res) => {
+    try {
+      const { images, grade, subject, distribution, previousQuestions } = req.body || {};
+
+      if (!Array.isArray(images) || images.length === 0) {
+        res.status(400).json({ error: 'يرجى إرفاق صفحة واحدة على الأقل من الدرس.' });
+        return;
+      }
+      if (images.length > 5) {
+        res.status(400).json({ error: 'الحد الأقصى للدرس الواحد هو 5 صور أو صفحات فقط.' });
+        return;
+      }
+
+      const validImages = images
+        .slice(0, 5)
+        .filter((item: unknown) => item && typeof (item as { base64?: unknown }).base64 === 'string');
+
+      if (validImages.length === 0) {
+        res.status(400).json({ error: 'لم يتم استلام صور صالحة من الدرس، يرجى المحاولة مرة أخرى.' });
+        return;
+      }
+
+      for (const item of validImages as Array<{ base64: string; mimeType?: string }>) {
+        const mime = String(item.mimeType || 'image/jpeg').toLowerCase();
+        if (mime.startsWith('video/')) {
+          res.status(400).json({ error: 'ممنوع رفع الفيديو، يُسمح بالصور والملفات فقط.' });
+          return;
+        }
+      }
+
+      // Normalize requested distribution (must total 5; defaults to 3 MCQ + 1 True/False + 1 Fill-in-Blank)
+      const rawMcq = Number(distribution?.mcq);
+      const rawTf = Number(distribution?.trueFalse);
+      const rawFill = Number(distribution?.fillBlank);
+      const isValidCustom =
+        Number.isInteger(rawMcq) &&
+        Number.isInteger(rawTf) &&
+        Number.isInteger(rawFill) &&
+        rawMcq >= 0 &&
+        rawTf >= 0 &&
+        rawFill >= 0 &&
+        rawMcq + rawTf + rawFill === 5;
+
+      const mcqCount = isValidCustom ? rawMcq : 3;
+      const tfCount = isValidCustom ? rawTf : 1;
+      const fillCount = isValidCustom ? rawFill : 1;
+
+      const expectedKinds: LessonQuestionKind[] = [
+        ...Array<LessonQuestionKind>(mcqCount).fill('mcq'),
+        ...Array<LessonQuestionKind>(tfCount).fill('true_false'),
+        ...Array<LessonQuestionKind>(fillCount).fill('fill_blank'),
+      ];
+
+      const avoidList = Array.isArray(previousQuestions)
+        ? previousQuestions
+            .map((q: unknown) => String(q || '').trim())
+            .filter(Boolean)
+            .slice(0, 10)
+        : [];
+
+      const avoidBlock =
+        avoidList.length > 0
+          ? `\n6. تنبيه مهم للإعادة: تم رفض الأسئلة السابقة التالية، يُمنع تكرارها أو إعادة صياغتها، ويجب إنشاء 5 أسئلة جديدة ومختلفة تماماً عن أفكارها:\n${avoidList
+              .map((txt, i) => `   - (${i + 1}) ${txt}`)
+              .join('\n')}`
+          : '';
+
+      const ai = createGeminiClient();
+      const pageParts = (validImages as Array<{ base64: string; mimeType?: string }>).flatMap((item, idx) => {
+        const img = extractBase64Image(item.base64, item.mimeType || 'image/jpeg');
+        return [
+          { text: `صفحة الدرس رقم ${idx + 1} من ${validImages.length}:` },
+          {
+            inlineData: {
+              mimeType: img.mimeType,
+              data: img.data,
+            },
+          },
+        ];
+      });
+
+      const response = await generateContentWithRetry(
+        ai,
+        {
+          model: FALLBACK_MODEL_ID, // Strictly gemini-3.1-flash-lite (free-tier compatible)
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                ...pageParts,
+                {
+                  text: `أنت معلم خبير ومعدّ اختبارات تربوية متقنة للمرحلة الأساسية (الصف: ${grade || 'الأساسي'}، المادة: ${subject || 'عامة'}).
+اقرأ جميع صفحات الدرس المرفوعة أعلاه بالتسلسل من الصفحة 1 إلى الصفحة ${validImages.length} وافهمها معاً كدرس واحد متكامل متصل دون إغفال أي فكرة أو معلومة.
+
+شروط صارمة:
+1. اعتمد في صياغة الأسئلة على محتوى الصفحات المرفوعة فقط، ولا تضف أي معلومات من خارج الدرس.
+2. قبل كتابة الأسئلة، حدّد الفكرة الرئيسية للدرس كاملاً ثم استخرج 5 أفكار فرعية رئيسية تغطي كامل الدرس عبر كل الصفحات المرفوعة (بداية الدرس، وسط الدرس، نهاية الدرس، الفهم والاستيعاب، وربط فكرتين من أجزاء مختلفة).
+3. أنشئ بالضبط 5 أسئلة بالتوزيع التالي حصراً:
+   - عدد (${mcqCount}) سؤال من نوع "mcq" (اختيار من متعدد): سؤال واضح + 4 خيارات مميزة + correctIndex من 0 إلى 3.
+   - عدد (${tfCount}) سؤال من نوع "true_false" (صح أو خطأ): عبارة خبرية دقيقة + خياران فقط ["صح", "خطأ"] + correctIndex (0 إذا كانت العبارة صحيحة، 1 إذا كانت العبارة خاطئة). نوّع بين الصح والخطأ ولا تجعل كل العبارات صحيحة.
+   - عدد (${fillCount}) سؤال من نوع "fill_blank" (أكمل العبارة): جملة ناقصة تحتوي على فراغ "......" في موضع كلمة أو مفهوم محوري + 4 خيارات للكلمة الناقصة + correctIndex من 0 إلى 3.
+4. رتّب الأسئلة الخمسة وفق هذه الأنواع بالضبط: [${expectedKinds.join(', ')}].
+5. يُمنع منعاً باتاً كتابة أسئلة سطحية أو نسخ جمل الكتاب حرفياً. صُغ كل سؤال بلغة عربية فصحى سليمة ومناسبة لمستوى الطالب، واجعل مواقع الإجابات الصحيحة متنوعة.${avoidBlock}
+أعد النتيجة بصيغة JSON مطابقة للبنية المطلوبة فقط.`,
+                },
+              ],
+            },
+          ],
+          config: {
+            thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                lessonMainIdea: { type: Type.STRING },
+                subIdeas: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                },
+                questions: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      questionKind: {
+                        type: Type.STRING,
+                        enum: ['mcq', 'true_false', 'fill_blank'],
+                      },
+                      questionText: { type: Type.STRING },
+                      options: {
+                        type: Type.ARRAY,
+                        items: { type: Type.STRING },
+                      },
+                      correctIndex: { type: Type.INTEGER },
+                    },
+                    required: ['questionKind', 'questionText', 'options', 'correctIndex'],
+                  },
+                },
+              },
+              required: ['lessonMainIdea', 'subIdeas', 'questions'],
+            },
+          },
+        },
+        2
+      );
+
+      const parsed = JSON.parse(response.text || '{}');
+      const rawQuestions = Array.isArray(parsed.questions) ? parsed.questions : [];
+      const sanitizedQuestions = rawQuestions
+        .slice(0, 5)
+        .map(
+          (
+            q: {
+              questionKind?: unknown;
+              questionText?: unknown;
+              options?: unknown;
+              correctIndex?: unknown;
+            },
+            idx: number
+          ) => {
+            const expectedKind = expectedKinds[idx] || 'mcq';
+            const rawKind = String(q?.questionKind || '').trim();
+            const questionKind: LessonQuestionKind =
+              rawKind === 'true_false' || rawKind === 'fill_blank' || rawKind === 'mcq'
+                ? (rawKind as LessonQuestionKind)
+                : expectedKind;
+
+            let questionText = String(q?.questionText || '').trim();
+            const rawOpts = Array.isArray(q?.options)
+              ? q.options.map((o: unknown) => String(o || '').trim()).filter(Boolean)
+              : [];
+
+            if (questionKind === 'true_false') {
+              const numIdx = Number(q?.correctIndex);
+              const rawChosen = String(rawOpts[numIdx] ?? rawOpts[0] ?? '').trim();
+              const isFalse =
+                rawChosen.includes('خطأ') ||
+                rawChosen.includes('خطا') ||
+                rawChosen.toLowerCase() === 'false' ||
+                (rawOpts.length === 2 &&
+                  rawOpts[0].includes('صح') &&
+                  numIdx === 1);
+              return {
+                questionKind: 'true_false' as LessonQuestionKind,
+                questionText,
+                options: ['صح', 'خطأ'],
+                correctIndex: isFalse ? 1 : 0,
+              };
+            }
+
+            if (questionKind === 'fill_blank' && questionText && !questionText.includes('..') && !questionText.includes('__')) {
+              questionText = `${questionText} (......)`;
+            }
+
+            const options = [
+              rawOpts[0] || 'الخيار الأول',
+              rawOpts[1] || 'الخيار الثاني',
+              rawOpts[2] || 'الخيار الثالث',
+              rawOpts[3] || 'الخيار الرابع',
+            ];
+            const numIdx = Number(q?.correctIndex);
+            const correctIndex = Number.isInteger(numIdx) && numIdx >= 0 && numIdx <= 3 ? numIdx : 0;
+            return {
+              questionKind,
+              questionText,
+              options,
+              correctIndex,
+            };
+          }
+        )
+        .filter((q: { questionText: string }) => q.questionText.length > 0);
+
+      if (sanitizedQuestions.length === 0) {
+        res.status(502).json({
+          error: 'تعذر تجهيز الأسئلة بوضوح، يرجى المحاولة بصور أوضح لصفحات الدرس.',
+        });
+        return;
+      }
+
+      const shuffledQuestions = shuffleAndBalanceQuestions(sanitizedQuestions.slice(0, 5));
+
+      res.json({
+        questions: shuffledQuestions,
+      });
+    } catch (error) {
+      console.error('[Lesson Prepare Questions Error]:', error);
+      const raw = error instanceof Error ? error.message : String(error || '');
+      const lower = raw.toLowerCase();
+      let safeMessage = 'تعذر تجهيز الأسئلة حالياً، يرجى المحاولة مرة أخرى.';
+      if (lower.includes('timeout') || lower.includes('aborted') || lower.includes('504') || lower.includes('deadline')) {
+        safeMessage = 'استغرق تجهيز الأسئلة وقتاً أطول من المعتاد، يرجى المحاولة مرة أخرى.';
+      } else if (lower.includes('503') || lower.includes('unavailable') || lower.includes('overloaded') || lower.includes('429') || lower.includes('resource_exhausted')) {
+        safeMessage = 'الخدمة مزدحمة مؤقتاً الآن، يرجى المحاولة مرة أخرى بعد قليل.';
+      }
+      res.status(500).json({ error: safeMessage });
     }
   });
 

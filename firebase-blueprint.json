@@ -476,6 +476,22 @@
       },
       "required": ["id", "schoolId", "recipientRole", "type", "message", "isRead", "createdAt"]
     },
+    "teacherDailyQuota": {
+      "title": "TeacherDailyQuota",
+      "description": "Tracks each teacher's daily 5-question lesson preparation limit",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Deterministic ID schoolId_teacherCode_YYYY-MM-DD" },
+        "schoolId": { "type": "string", "description": "School identifier" },
+        "teacherCode": { "type": "string", "description": "Teacher activation code" },
+        "teacherName": { "type": "string", "description": "Teacher display name" },
+        "date": { "type": "string", "description": "YYYY-MM-DD local date" },
+        "used": { "type": "boolean", "description": "Whether the daily quota of 5 questions has been used" },
+        "questionsCount": { "type": "number", "description": "Number of questions prepared today (5 max)" },
+        "updatedAt": { "type": "number", "description": "Timestamp ms" }
+      },
+      "required": ["id", "schoolId", "teacherCode", "date", "used", "questionsCount"]
+    },
     "testConnection": {
       "title": "TestConnection",
       "description": "Connection health check entity",
@@ -568,6 +584,10 @@
     "/notifications/{notificationId}": {
       "schema": "notification",
       "description": "Collection storing workflow notifications between Supervisor and Principal"
+    },
+    "/teacher_daily_quotas/{quotaId}": {
+      "schema": "teacherDailyQuota",
+      "description": "Collection storing daily 5-question preparation usage per teacher per date"
     }
   }
 }

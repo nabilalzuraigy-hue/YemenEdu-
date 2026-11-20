@@ -152,5 +152,11 @@ service cloud.firestore {
       allow read: if true;
       allow write: if isValidId(notificationId);
     }
+
+    // Teacher Daily Question Preparation Quota (5 questions/day limit)
+    match /teacher_daily_quotas/{quotaId} {
+      allow read: if true;
+      allow write: if isValidId(quotaId);
+    }
   }
 }

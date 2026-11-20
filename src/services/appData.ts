@@ -455,6 +455,7 @@ export interface Question {
   class?: string;
   subject: string;
   type: string;
+  questionKind?: 'mcq' | 'true_false' | 'fill_blank';
   questionText: string;
   text?: string;
   imageUrl?: string;
