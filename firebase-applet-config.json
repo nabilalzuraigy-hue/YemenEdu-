@@ -3,10 +3,10 @@
   "appId": "1:66506315606:web:cf719fb2d1a9606f5228f7",
   "apiKey": "AIzaSyDhYjCWkii1iBvRIKg71dFdsLAuZQGWk4o",
   "authDomain": "yemenedu-69e4e.firebaseapp.com",
-  "firestoreDatabaseId": "(default)",
+  "firestoreDatabaseId": "ai-studio-yemeneduapp-5e6a5f63-0b1e-4a0b-97cc-ff58ca34a641",
   "storageBucket": "yemenedu-69e4e.firebasestorage.app",
   "messagingSenderId": "66506315606",
   "measurementId": "",
-  "oAuthClientId": "",
+  "oAuthClientId": "66506315606-r9gtkufsbae5ijg5abp8ho47sha5ane0.apps.googleusercontent.com",
   "recaptchaSiteKey": ""
 }
