@@ -17,7 +17,6 @@ import {
   Clock,
   User,
   AlertTriangle,
-  BookOpen,
   Activity,
   UserCheck,
   Trophy,
@@ -26,7 +25,6 @@ import { UserSession } from '../services/authService';
 import { formatArabicSchoolName, getUserInitials } from '../utils/schoolDisplay';
 
 export type StudentArchiveSection =
-  | 'weekly_homework'
   | 'monthly_homework'
   | 'monthly_grades'
   | 'monthly_circulars'
@@ -522,22 +520,6 @@ export const UnifiedSidebar: React.FC<UnifiedSidebarProps> = ({
                       {/* STUDENT ARCHIVE SUB-SECTIONS */}
                       {session.role === 'student' && (
                         <>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              onSelectView('weekly_homework');
-                              onClose();
-                            }}
-                            className={`w-full min-h-[40px] px-2.5 py-2 rounded-lg text-xs font-bold flex items-center gap-2 transition cursor-pointer ${
-                              activeView === 'weekly_homework'
-                                ? 'bg-white/18 text-white'
-                                : 'text-white/90 hover:text-white hover:bg-white/10'
-                            }`}
-                          >
-                            <BookOpen className="w-3.5 h-3.5 text-white/85 shrink-0" />
-                            <span className="truncate">ارشيف الواجب الاسبوعي</span>
-                          </button>
-
                           <button
                             type="button"
                             onClick={() => {
