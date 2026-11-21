@@ -470,6 +470,7 @@ export interface Question {
   createdAtFormatted?: string;
   timestamp?: number;
   month?: string;
+  archivedByTeacherAt?: number;
 }
 
 export const isObjectiveQuestion = (type?: string) => {

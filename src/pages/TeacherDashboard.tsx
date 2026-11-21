@@ -31,10 +31,9 @@ import {
   Edit3,
   Image as ImageIcon,
   RotateCcw,
-  FileSpreadsheet,
   Minus,
 } from 'lucide-react';
-import { collection, query, where, onSnapshot, addDoc, doc, serverTimestamp, setDoc, getDoc } from 'firebase/firestore';
+import { collection, query, where, onSnapshot, addDoc, doc, serverTimestamp, setDoc, getDoc, updateDoc } from 'firebase/firestore';
 import { db, auth } from '../firebase/config';
 import { UserSession, authService, cleanFirestorePayload, normalizeArabicForMatch } from '../services/authService';
 import {
@@ -46,10 +45,6 @@ import {
   shuffleAndBalanceQuestions,
   type LessonQuestionKind,
 } from '../utils/questionShuffle';
-import {
-  parseAndShuffleExcelQuestions,
-  type ImportedExcelQuestion,
-} from '../utils/excelQuestionParser';
 import {
   appDataService,
   Question,
@@ -129,11 +124,26 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
   const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(false);
   const [isRecommendationsModalOpen, setIsRecommendationsModalOpen] = useState<boolean>(false);
   const [activeSidebarView, setActiveSidebarView] = useState<string>('dashboard');
+  const [isQuestionsArchiveView, setIsQuestionsArchiveView] = useState<boolean>(false);
+  const [answeredQuestionIdsFromGrades, setAnsweredQuestionIdsFromGrades] = useState<Set<string>>(() => new Set());
+  const [answeredQuestionIdsFromSubs, setAnsweredQuestionIdsFromSubs] = useState<Set<string>>(() => new Set());
+  const [locallyArchivedQuestionIds, setLocallyArchivedQuestionIds] = useState<Record<string, number>>(() => {
+    try {
+      const sKey = (session.schoolId || 'default').replace(/[^a-zA-Z0-9_-]/g, '_');
+      const tKey = (session.code || 'teacher').replace(/[^a-zA-Z0-9_-]/g, '_');
+      const raw = localStorage.getItem(`teacher_archived_q_map_${sKey}_${tKey}`);
+      return raw ? JSON.parse(raw) : {};
+    } catch {
+      return {};
+    }
+  });
+  const [archiveAlertOpen, setArchiveAlertOpen] = useState<boolean>(false);
+  const [pendingAckBatchKeys, setPendingAckBatchKeys] = useState<string[]>([]);
   const gradebookTableScrollRef = useRef<HTMLDivElement>(null);
 
   const scrollGradebookTable = (direction: 'left' | 'right') => {
     if (!gradebookTableScrollRef.current) return;
-    const offset = direction === 'left' ? -150 : 150;
+    const offset = direction === 'left' ? -180 : 180;
     gradebookTableScrollRef.current.scrollBy({ left: offset, behavior: 'smooth' });
   };
 
@@ -151,21 +161,23 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
     setActiveSidebarView(view);
     if (view === 'dashboard') {
       setActiveTab('create_question');
+      setIsQuestionsArchiveView(false);
       setSelectedMonthView('active');
     } else if (view === 'schedule') {
       setActiveTab('schedule');
+      setIsQuestionsArchiveView(false);
     } else if (view === 'archive_questions') {
       setActiveTab('create_question');
-      if (archivedGradebooks.length > 0) {
-        setSelectedMonthView(archivedGradebooks[0].id);
-      }
+      setIsQuestionsArchiveView(true);
     } else if (view === 'archive_grades') {
       setActiveTab('gradebook');
+      setIsQuestionsArchiveView(false);
       if (archivedGradebooks.length > 0) {
         setSelectedMonthView(archivedGradebooks[0].id);
       }
     } else if (view === 'archive_circulars') {
       setActiveTab('announcements');
+      setIsQuestionsArchiveView(false);
     }
   };
 
@@ -333,6 +345,13 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
             return true;
           });
           setRegisteredGrades(filteredForClass);
+          setAnsweredQuestionIdsFromGrades(
+            new Set(
+              filteredForClass
+                .map((g) => g.questionId)
+                .filter((id): id is string => Boolean(id && String(id).trim()))
+            )
+          );
 
           // Requirement 4: Query grades, groupBy studentCode, real totalObtained & totalMax, strictly this school
           const allStudentCodes = authService.getRegisteredCodes().filter(
@@ -446,6 +465,23 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
               }
               return true;
             });
+          setAnsweredQuestionIdsFromSubs(
+            new Set(
+              subsList
+                .filter((sub: any) => {
+                  const matchesClass = !sub.class && !sub.grade ? true : (sub.class === teacherClass || sub.grade === teacherGrade);
+                  if (!matchesClass) return false;
+                  const matchesSubject =
+                    !sub.subject ||
+                    sub.subject === teacherSubject ||
+                    String(sub.subject).includes(teacherSubject) ||
+                    teacherSubject.includes(String(sub.subject));
+                  return matchesSubject;
+                })
+                .map((sub: any) => sub.questionId)
+                .filter((id): id is string => Boolean(id && String(id).trim()))
+            )
+          );
           setGradeSheetData((prev) =>
             prev.map((s) => {
               const matchingCount = subsList.filter(
@@ -642,16 +678,155 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
   });
   const [isSendingPrepared, setIsSendingPrepared] = useState<boolean>(false);
 
-  // Excel Question Import State (with same anti-cheat answer shuffling)
-  const [excelImportedQuestions, setExcelImportedQuestions] = useState<ImportedExcelQuestion[]>([]);
-  const [excelImportError, setExcelImportError] = useState<string | null>(null);
-  const [isSendingExcel, setIsSendingExcel] = useState<boolean>(false);
-  const excelQuestionInputRef = useRef<HTMLInputElement>(null);
-
   const lessonCameraInputRef = useRef<HTMLInputElement>(null);
   const lessonFileInputRef = useRef<HTMLInputElement>(null);
   const lessonAddMoreInputRef = useRef<HTMLInputElement>(null);
   const lessonRegenerateUploadInputRef = useRef<HTMLInputElement>(null);
+
+  const formatDayKeyFromTimestamp = (ts: number): string => {
+    const d = new Date(ts || Date.now());
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  };
+
+  const formatArabicDayLabel = (dayKey: string): string => {
+    const parts = dayKey.split('-').map(Number);
+    if (parts.length !== 3 || parts.some(isNaN)) return dayKey;
+    const targetDate = new Date(parts[0], parts[1] - 1, parts[2]);
+    const now = new Date();
+    const todayKey = formatDayKeyFromTimestamp(now.getTime());
+    const yesterdayDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+    const yesterdayKey = formatDayKeyFromTimestamp(yesterdayDate.getTime());
+
+    let formattedDate = dayKey;
+    try {
+      formattedDate = new Intl.DateTimeFormat('ar-YE', {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+      }).format(targetDate);
+    } catch {
+      formattedDate = dayKey;
+    }
+
+    if (dayKey === todayKey) return `اليوم — ${formattedDate}`;
+    if (dayKey === yesterdayKey) return `أمس — ${formattedDate}`;
+    return formattedDate;
+  };
+
+  const answeredQuestionIds = React.useMemo(() => {
+    const merged = new Set<string>();
+    answeredQuestionIdsFromGrades.forEach((id) => merged.add(id));
+    answeredQuestionIdsFromSubs.forEach((id) => merged.add(id));
+    registeredGrades.forEach((g) => {
+      if (g.questionId) merged.add(g.questionId);
+    });
+    const localSubs = appDataService.getSubmissions(undefined, teacherSubject, teacherGrade, teacherSchoolId);
+    localSubs.forEach((s) => {
+      if (s.questionId) merged.add(s.questionId);
+    });
+    return merged;
+  }, [answeredQuestionIdsFromGrades, answeredQuestionIdsFromSubs, registeredGrades, teacherSubject, teacherGrade, teacherSchoolId]);
+
+  const isQuestionArchivedForTeacher = (q: Question): boolean => {
+    return Boolean(
+      (q as any).archivedByTeacherAt ||
+        locallyArchivedQuestionIds[q.id] ||
+        (q.id && answeredQuestionIds.has(q.id))
+    );
+  };
+
+  const archivedAlertAckStorageKey = `teacher_archive_alert_ack_${safeSchoolKey}_${safeTeacherKey}`;
+  const archivedMapStorageKey = `teacher_archived_q_map_${safeSchoolKey}_${safeTeacherKey}`;
+
+  // Automatic archival of day's questions once students start answering them + alert notification
+  useEffect(() => {
+    if (questions.length === 0 || answeredQuestionIds.size === 0) return;
+
+    const currentMonthQuestions = questions.filter((q) => {
+      if (rolloverTimestamp > 0) {
+        const ts = (q as any).timestamp || getQuestionTimestamp(q) || 0;
+        return ts >= rolloverTimestamp;
+      }
+      return true;
+    });
+
+    const unarchivedQuestions = currentMonthQuestions.filter(
+      (q) => !(q as any).archivedByTeacherAt && !locallyArchivedQuestionIds[q.id]
+    );
+    if (unarchivedQuestions.length === 0) return;
+
+    const byDay = new Map<string, Question[]>();
+    for (const q of unarchivedQuestions) {
+      const ts = (q as any).timestamp || getQuestionTimestamp(q) || Date.now();
+      const dayKey = formatDayKeyFromTimestamp(ts);
+      const list = byDay.get(dayKey) || [];
+      list.push(q);
+      byDay.set(dayKey, list);
+    }
+
+    const newlyArchivedIds: Record<string, number> = {};
+    const newBatchAckKeys: string[] = [];
+    const nowTs = Date.now();
+
+    let ackSet = new Set<string>();
+    try {
+      const savedAck = localStorage.getItem(archivedAlertAckStorageKey);
+      if (savedAck) ackSet = new Set(JSON.parse(savedAck));
+    } catch {
+      // ignore
+    }
+
+    byDay.forEach((dayQuestions, dayKey) => {
+      const hasAnyStudentAnswer = dayQuestions.some((q) => q.id && answeredQuestionIds.has(q.id));
+      if (!hasAnyStudentAnswer) return;
+
+      const sortedIds = dayQuestions.map((q) => q.id).filter(Boolean).sort();
+      const batchKey = `${dayKey}_${sortedIds[0] || 'batch'}`;
+      if (!ackSet.has(batchKey)) {
+        newBatchAckKeys.push(batchKey);
+      }
+
+      dayQuestions.forEach((q) => {
+        if (!q.id) return;
+        newlyArchivedIds[q.id] = nowTs;
+        updateDoc(doc(db, 'questions', q.id), { archivedByTeacherAt: nowTs }).catch(() => {});
+      });
+    });
+
+    if (Object.keys(newlyArchivedIds).length > 0) {
+      setLocallyArchivedQuestionIds((prev) => {
+        const merged = { ...prev, ...newlyArchivedIds };
+        try {
+          localStorage.setItem(archivedMapStorageKey, JSON.stringify(merged));
+        } catch {
+          // ignore
+        }
+        return merged;
+      });
+    }
+
+    if (newBatchAckKeys.length > 0) {
+      setPendingAckBatchKeys((prev) => Array.from(new Set([...prev, ...newBatchAckKeys])));
+      setArchiveAlertOpen(true);
+    }
+  }, [questions, answeredQuestionIds, rolloverTimestamp, locallyArchivedQuestionIds, archivedAlertAckStorageKey, archivedMapStorageKey]);
+
+  const handleConfirmArchiveAlert = () => {
+    try {
+      const savedAck = localStorage.getItem(archivedAlertAckStorageKey);
+      const ackSet = new Set<string>(savedAck ? JSON.parse(savedAck) : []);
+      pendingAckBatchKeys.forEach((k) => ackSet.add(k));
+      localStorage.setItem(archivedAlertAckStorageKey, JSON.stringify(Array.from(ackSet)));
+    } catch {
+      // ignore
+    }
+    setPendingAckBatchKeys([]);
+    setArchiveAlertOpen(false);
+  };
 
   const adjustQuestionDistribution = (
     target: 'mcq' | 'trueFalse' | 'fillBlank',
@@ -1124,49 +1299,19 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
     }
   };
 
-  const handleExcelQuestionFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = '';
-    if (!file) return;
-    setExcelImportError(null);
-    try {
-      const imported = await parseAndShuffleExcelQuestions(file);
-      setExcelImportedQuestions(imported);
-    } catch (err) {
-      setExcelImportError(
-        err instanceof Error ? err.message : 'تعذر قراءة ملف الإكسل، تأكد من صيغة الملف.'
-      );
-    }
-  };
-
-  const handleSendExcelQuestions = async () => {
-    if (excelImportedQuestions.length === 0 || isSendingExcel) return;
-    setExcelImportError(null);
-    setIsSendingExcel(true);
-    try {
-      const reshuffled = shuffleAndBalanceQuestions(excelImportedQuestions) as ImportedExcelQuestion[];
-      const savedCount = await saveBatchQuestionsToFirestore(reshuffled);
-      setExcelImportedQuestions([]);
-      setToastMsg(`✅ تم إرسال (${savedCount}) أسئلة من Excel بنجاح مع توزيع الإجابات!`);
-      setTimeout(() => setToastMsg(null), 4000);
-    } catch {
-      setExcelImportError('تعذر حفظ الأسئلة المستوردة حالياً، يرجى المحاولة مرة أخرى.');
-    } finally {
-      setIsSendingExcel(false);
-    }
-  };
-
-  // 1. Submit New MCQ Question (Only Multiple Choice, No Essay, No Photos)
+  // 1. Submit New Manual MCQ Question (Only Multiple Choice, No Essay, No Photos)
   const handleCreateQuestion = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!qText.trim()) {
-      alert('يرجى كتابة نص السؤال.');
+      setToastMsg('يرجى كتابة نص السؤال.');
+      setTimeout(() => setToastMsg(null), 3500);
       return;
     }
 
     const emptyOpt = options.some((opt) => !opt.trim());
     if (emptyOpt) {
-      alert('يرجى تعبئة جميع الخيارات الأربعة للسؤال الموضوعي.');
+      setToastMsg('يرجى تعبئة جميع الخيارات الأربعة للسؤال.');
+      setTimeout(() => setToastMsg(null), 3500);
       return;
     }
 
@@ -1176,7 +1321,8 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
 
     // 1- منع التكرار (نفس النص فقط):
     if (questions.some((q) => (q.questionText || q.text || '').trim().replace(/\s+/g, ' ').toLowerCase() === n)) {
-      alert('نفس السؤال موجود مسبقاً في بنك الأسئلة.');
+      setToastMsg('نفس السؤال موجود مسبقاً في بنك الأسئلة.');
+      setTimeout(() => setToastMsg(null), 3500);
       return;
     }
 
@@ -1464,8 +1610,182 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
         </div>
       )}
 
-      {/* TAB 1: ADD QUESTION (MCQ ONLY) */}
-      {activeTab === 'create_question' && (
+      {/* TAB 1: ADD QUESTION / QUESTIONS ARCHIVE */}
+      {activeTab === 'create_question' && isQuestionsArchiveView && (
+        <div className="space-y-5">
+          {(() => {
+            const dailyArchivedQuestions = questions.filter((q) => isQuestionArchivedForTeacher(q));
+            const monthlyArchivedQuestions = archivedGradebooks.flatMap((arc) =>
+              (arc.questions || []).map((q) => ({ ...q, month: q.month || arc.month }))
+            );
+            const combinedArchived = [...dailyArchivedQuestions, ...monthlyArchivedQuestions].filter(
+              (q, index, self) =>
+                index ===
+                self.findIndex(
+                  (t) =>
+                    (t.id && t.id === q.id) ||
+                    ((t.questionText || t.text || '').trim().replace(/\s+/g, ' ').toLowerCase() ===
+                      (q.questionText || q.text || '').trim().replace(/\s+/g, ' ').toLowerCase() &&
+                      t.subject === q.subject &&
+                      (t.grade === q.grade || t.class === q.class))
+                )
+            );
+            combinedArchived.sort((a, b) => getQuestionTimestamp(b) - getQuestionTimestamp(a));
+
+            const dayGroupMap = new Map<string, Question[]>();
+            for (const q of combinedArchived) {
+              const ts = (q as any).timestamp || getQuestionTimestamp(q) || Date.now();
+              const dKey = formatDayKeyFromTimestamp(ts);
+              const arr = dayGroupMap.get(dKey) || [];
+              arr.push(q);
+              dayGroupMap.set(dKey, arr);
+            }
+            const dayGroups = Array.from(dayGroupMap.entries()).sort((a, b) => b[0].localeCompare(a[0]));
+
+            return (
+              <>
+                <div className="bg-white rounded-2xl p-4 sm:p-5 border border-[#DCE7F3] shadow-sm flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2.5 bg-[#EEF5FC] text-[#1F5AAA] rounded-xl border border-[#C6DCF2]">
+                      <Archive className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h3 className="font-black text-base text-[#1A3A5F]">
+                        أرشيف الأسئلة ({combinedArchived.length})
+                      </h3>
+                      <p className="text-xs text-slate-600 font-semibold mt-0.5">
+                        يتم ترحيل أسئلة اليوم تلقائياً إلى الأرشيف عند بدء الطلاب بالإجابة عليها، ومرتبة يومياً مع فواصل واضحة
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsQuestionsArchiveView(false);
+                      setActiveSidebarView('dashboard');
+                      setSelectedMonthView('active');
+                    }}
+                    className="px-4 py-2 rounded-xl bg-[#1F5AAA] hover:bg-[#194B91] text-white text-xs font-black flex items-center gap-1.5 transition shadow-sm cursor-pointer border border-[#194B91]"
+                  >
+                    <ArrowRight className="w-4 h-4" />
+                    <span>العودة إلى إضافة سؤال</span>
+                  </button>
+                </div>
+
+                {dayGroups.length === 0 ? (
+                  <div className="bg-white rounded-2xl p-8 border border-[#DCE7F3] text-center shadow-sm">
+                    <Archive className="w-12 h-12 text-[#9BBEDF] mx-auto mb-3" />
+                    <h4 className="font-black text-base text-[#1A3A5F]">
+                      لا توجد أسئلة مؤرشفة حالياً
+                    </h4>
+                    <p className="text-xs text-slate-600 font-medium mt-1">
+                      ستنتقل أسئلة اليوم تلقائياً إلى هنا بمجرد بدء بعض الطلاب بالإجابة عليها.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-6">
+                    {dayGroups.map(([dayKey, dayQuestions], dayIdx) => (
+                      <React.Fragment key={dayKey}>
+                        <div className="space-y-3">
+                          <div className="flex flex-wrap items-center justify-between gap-2 bg-[#EEF5FC] border border-[#C6DCF2] rounded-xl px-4 py-2.5">
+                            <div className="flex items-center gap-2">
+                              <Calendar className="w-4 h-4 text-[#1F5AAA]" />
+                              <span className="text-xs sm:text-sm font-black text-[#1A3A5F]">
+                                {formatArabicDayLabel(dayKey)}
+                              </span>
+                            </div>
+                            <span className="px-2.5 py-0.5 rounded-full bg-white text-[#1F5AAA] border border-[#C6DCF2] text-[11px] font-black">
+                              {dayQuestions.length} أسئلة
+                            </span>
+                          </div>
+
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            {dayQuestions.map((q, qIdx) => (
+                              <div
+                                key={q.id ? `arch-q-${q.id}-${qIdx}` : `arch-q-idx-${dayKey}-${qIdx}`}
+                                className="bg-white rounded-2xl p-5 border border-[#DCE7F3] shadow-sm flex flex-col justify-between"
+                              >
+                                <div>
+                                  <div className="flex items-center justify-between mb-2">
+                                    <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2]">
+                                      الصف {q.grade === '9' ? 'التاسع' : q.grade === '8' ? 'الثامن' : 'السابع'} • {q.subject}
+                                    </span>
+                                    <div className="flex items-center gap-1.5">
+                                      <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full border bg-purple-50 text-purple-800 border-purple-200">
+                                        [{q.questionKind ? QUESTION_KIND_LABELS[q.questionKind] : 'سؤال موضوعي'}]
+                                      </span>
+                                      <span className="text-xs font-bold text-[#1A3A5F] bg-[#F4F8FC] px-2 py-0.5 rounded-md border border-[#DCE7F3]">
+                                        {q.points || 5} درجات
+                                      </span>
+                                    </div>
+                                  </div>
+
+                                  <h4 className="font-bold text-[#1A3A5F] text-xs sm:text-sm mb-2">{q.questionText || q.text}</h4>
+
+                                  {q.options && (
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 text-xs text-slate-800 my-2">
+                                      {q.options.map((opt, i) => (
+                                        <div
+                                          key={`arch-opt-${q.id || qIdx}-${i}`}
+                                          className={`p-1.5 rounded-lg border text-[11px] ${
+                                            q.correctIndex === i || q.correctOption === i
+                                              ? 'bg-emerald-50 border-emerald-300 font-bold text-emerald-900'
+                                              : 'bg-[#F8FAFD] border-slate-200'
+                                          }`}
+                                        >
+                                          <span>{i === 0 ? 'أ' : i === 1 ? 'ب' : i === 2 ? 'ج' : 'د'}: </span>
+                                          {opt}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
+                                </div>
+
+                                <div className="pt-3 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-600">
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <span className="font-bold text-[#1A3A5F]">المعلم: {q.teacherName || session.name}</span>
+                                    <span className="flex items-center gap-1 text-[#1F5AAA] font-bold bg-[#EEF5FC] px-2 py-0.5 rounded-md border border-[#C6DCF2]">
+                                      <Clock className="w-3.5 h-3.5 text-[#1F5AAA]" />
+                                      <span>{q.createdAtFormatted || formatArabicDateTime(q.createdAt || q.timestamp)}</span>
+                                    </span>
+                                  </div>
+                                  {questions.some((activeQ) => activeQ.id === q.id) && (
+                                    <button
+                                      type="button"
+                                      onClick={async () => {
+                                        await appDataService.deleteQuestion(q.id);
+                                      }}
+                                      className="text-rose-700 hover:text-rose-900 font-bold cursor-pointer"
+                                    >
+                                      حذف السؤال
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* فاصل واضح بين أسئلة اليوم واليوم التالي */}
+                        {dayIdx < dayGroups.length - 1 && (
+                          <div className="relative flex items-center justify-center py-3" role="separator">
+                            <div className="w-full border-t-2 border-dashed border-[#9BBEDF]" />
+                            <span className="absolute bg-[#EDF0F5] px-4 py-1 rounded-full border border-[#9BBEDF] text-[11px] font-black text-[#1F5AAA] shadow-2xs whitespace-nowrap">
+                              فاصل بين أسئلة ({formatArabicDayLabel(dayKey).split('—')[0].trim()}) و ({formatArabicDayLabel(dayGroups[dayIdx + 1][0]).split('—')[0].trim()})
+                            </span>
+                          </div>
+                        )}
+                      </React.Fragment>
+                    ))}
+                  </div>
+                )}
+              </>
+            );
+          })()}
+        </div>
+      )}
+
+      {activeTab === 'create_question' && !isQuestionsArchiveView && (
         <div className="space-y-6">
           {/* Month Selector for Questions */}
           <div className="flex flex-wrap items-center justify-between gap-3 bg-white p-4 rounded-2xl border border-[#DCE7F3] shadow-sm">
@@ -1958,111 +2278,23 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
             </div>
           )}
 
-          {/* Question Creation Form & Excel Import (Only in Active Month View) */}
+          {/* Manual Question Creation Form (Only in Active Month View) */}
           {!isViewingArchive && (
             <div className="bg-white rounded-2xl p-6 shadow-sm border border-[#DCE7F3]">
               <div className="border-b border-slate-200 pb-3 mb-4 flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <h3 className="font-black text-base text-[#1A3A5F] flex items-center gap-2">
                     <PlusCircle className="w-5 h-5 text-[#1F5AAA]" />
-                    إضافة سؤال موضوعي جديد لشهر ({activeMonth})
+                    إضافة سؤال يدوي جديد لشهر ({activeMonth})
                   </h3>
                   <p className="text-xs text-slate-600 font-semibold mt-0.5">
-                    سؤال تفاعلي باختيار من متعدد أو استيراد أسئلة من ملف Excel مع خلط الإجابات تلقائياً
+                    سؤال تفاعلي باختيار من متعدد
                   </p>
                 </div>
-                <div className="flex items-center gap-2">
-                  <input
-                    ref={excelQuestionInputRef}
-                    type="file"
-                    accept=".xlsx,.xls,.csv"
-                    className="hidden"
-                    onChange={handleExcelQuestionFileChange}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => excelQuestionInputRef.current?.click()}
-                    className="px-3 py-1.5 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border border-emerald-300 text-xs font-black flex items-center gap-1.5 cursor-pointer transition"
-                  >
-                    <FileSpreadsheet className="w-4 h-4 text-emerald-700" />
-                    <span>استيراد من Excel</span>
-                  </button>
-                  <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2]">
-                    شهر {activeMonth} (نشط)
-                  </span>
-                </div>
+                <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2]">
+                  شهر {activeMonth} (نشط)
+                </span>
               </div>
-
-              {excelImportError && (
-                <div className="mb-4 p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-900 text-xs font-bold flex items-center justify-between">
-                  <span>{excelImportError}</span>
-                  <button type="button" onClick={() => setExcelImportError(null)} className="cursor-pointer">
-                    <X className="w-4 h-4" />
-                  </button>
-                </div>
-              )}
-
-              {excelImportedQuestions.length > 0 && (
-                <div className="mb-5 p-4 rounded-2xl bg-[#F4F8FC] border border-[#9BBEDF] space-y-3">
-                  <div className="flex items-center justify-between flex-wrap gap-2">
-                    <span className="text-xs font-black text-[#1A3A5F]">
-                      أسئلة مستوردة من Excel ({excelImportedQuestions.length} سؤال — تم خلط وتوزيع الإجابات عشوائياً)
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setExcelImportedQuestions([])}
-                      className="text-xs font-bold text-rose-600 hover:underline cursor-pointer"
-                    >
-                      إلغاء الاستيراد
-                    </button>
-                  </div>
-                  <div className="space-y-2 max-h-64 overflow-y-auto">
-                    {excelImportedQuestions.map((eq, idx) => (
-                      <div key={eq.id} className="bg-white rounded-xl p-3 border border-[#DCE7F3] text-xs space-y-1.5">
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="font-black text-[#1A3A5F]">
-                            {idx + 1}. {eq.questionText}
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setExcelImportedQuestions((prev) => prev.filter((item) => item.id !== eq.id))
-                            }
-                            className="text-rose-600 hover:text-rose-800 cursor-pointer"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                        <div className="flex flex-wrap gap-2">
-                          {eq.options.map((opt, oIdx) => (
-                            <span
-                              key={`${eq.id}-${oIdx}`}
-                              className={`px-2 py-0.5 rounded-lg border text-[11px] ${
-                                eq.correctIndex === oIdx
-                                  ? 'bg-emerald-50 border-emerald-300 text-emerald-900 font-bold'
-                                  : 'bg-slate-50 border-slate-200 text-slate-700'
-                              }`}
-                            >
-                              {oIdx === 0 ? 'أ' : oIdx === 1 ? 'ب' : oIdx === 2 ? 'ج' : 'د'}: {opt}
-                            </span>
-                          ))}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                  <div className="flex justify-end">
-                    <button
-                      type="button"
-                      onClick={handleSendExcelQuestions}
-                      disabled={isSendingExcel}
-                      className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-black flex items-center gap-2 cursor-pointer"
-                    >
-                      {isSendingExcel ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-                      <span>إرسال أسئلة Excel ({excelImportedQuestions.length})</span>
-                    </button>
-                  </div>
-                </div>
-              )}
 
               <form onSubmit={handleCreateQuestion} className="space-y-4">
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -2165,6 +2397,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
               const sourceList = isViewingArchive
                 ? (selectedArchive?.questions || [])
                 : questions.filter((q) => {
+                    if (isQuestionArchivedForTeacher(q)) return false;
                     if (rolloverTimestamp > 0) {
                       const ts = (q as any).timestamp || getQuestionTimestamp(q) || 0;
                       return ts >= rolloverTimestamp;
@@ -2371,75 +2604,64 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
             </div>
           )}
 
-          {/* Active Month Status Banner */}
-          {!isViewingArchive && (
-            <div className="bg-[#EEF5FC] border border-[#C6DCF2] rounded-xl p-3 flex flex-wrap items-center justify-between gap-2 text-xs text-[#1A3A5F]">
-              <div className="flex items-center gap-2">
-                <Sparkles className="w-4 h-4 text-[#1F5AAA]" />
-                <span>
-                  الكشف النشط لشهر <strong className="text-[#1F5AAA]">({activeMonth})</strong> — يتم رصد التسليمات والدرجات حيّاً. عند نهاية الشهر اضغط زر <strong>&quot;أرشفة وترحيل شهر ({activeMonth})&quot;</strong> لتجميده وبدء كشف نظيف للشهر القادم.
-                </span>
-              </div>
-              <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-white text-[#1F5AAA] border border-[#C6DCF2]">
-                {displayedRoster.length} طلاب مسجلين
+          {/* PDF Export & Table Scroll Controls Row */}
+          <div className="flex items-center justify-between gap-2 flex-wrap pt-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              <h4 className="text-sm sm:text-base font-black text-[#1A3A5F]">
+                جدول كشف الدرجات
+              </h4>
+              <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2]">
+                {displayedRoster.length} طلاب
               </span>
             </div>
-          )}
-
-          {/* PDF Export Button ABOVE & OUTSIDE Horizontal Scroll */}
-          <div className="flex items-center justify-between gap-2 flex-wrap pt-1">
-            <h4 className="text-sm font-black text-[#1A3A5F]">
-              جدول كشف الدرجات
-            </h4>
-            <button
-              type="button"
-              onClick={() => setShowPdfModal(true)}
-              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#1F5AAA] hover:bg-[#194B91] text-white text-xs font-black transition shadow-sm cursor-pointer shrink-0 border border-[#194B91]"
-              title="تصدير كشف درجات ملون ومنسق A4 كملف PDF"
-            >
-              <Download className="w-3.5 h-3.5" />
-              <span>تحميل كشف PDF</span>
-            </button>
+            <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => scrollGradebookTable('right')}
+                  aria-label="تمرير لليمين"
+                  className="w-8 h-8 rounded-xl bg-[#F4F8FC] hover:bg-[#EEF5FC] border border-[#C6DCF2] text-[#1F5AAA] flex items-center justify-center shadow-2xs cursor-pointer"
+                >
+                  <ArrowRight className="w-4 h-4" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => scrollGradebookTable('left')}
+                  aria-label="تمرير لليسار"
+                  className="w-8 h-8 rounded-xl bg-[#F4F8FC] hover:bg-[#EEF5FC] border border-[#C6DCF2] text-[#1F5AAA] flex items-center justify-center shadow-2xs cursor-pointer"
+                >
+                  <ArrowLeft className="w-4 h-4" />
+                </button>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowPdfModal(true)}
+                className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#1F5AAA] hover:bg-[#194B91] text-white text-xs font-black transition shadow-sm cursor-pointer shrink-0 border border-[#194B91]"
+                title="تصدير كشف درجات ملون ومنسق A4 كملف PDF"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>تحميل كشف PDF</span>
+              </button>
+            </div>
           </div>
 
-          {/* Horizontal Scroll Table Container with Sticky Student Name & Left/Right Arrows */}
-          <div className="rounded-2xl bg-[#F4F8FC] border border-[#DCE7F3] p-2 sm:p-3 relative">
-            {/* Right Scroll Arrow */}
-            <button
-              type="button"
-              onClick={() => scrollGradebookTable('right')}
-              aria-label="تمرير لليمين"
-              className="w-7 h-7 rounded-full bg-white hover:bg-[#EEF5FC] border border-[#C6DCF2] text-[#1F5AAA] flex items-center justify-center shadow-sm absolute right-1.5 top-1/2 -translate-y-1/2 z-30 cursor-pointer"
-            >
-              <ArrowRight className="w-3.5 h-3.5" />
-            </button>
-
-            {/* Left Scroll Arrow */}
-            <button
-              type="button"
-              onClick={() => scrollGradebookTable('left')}
-              aria-label="تمرير لليسار"
-              className="w-7 h-7 rounded-full bg-white hover:bg-[#EEF5FC] border border-[#C6DCF2] text-[#1F5AAA] flex items-center justify-center shadow-sm absolute left-1.5 top-1/2 -translate-y-1/2 z-30 cursor-pointer"
-            >
-              <ArrowLeft className="w-3.5 h-3.5" />
-            </button>
-
-            {/* Inner Horizontal Scroll Wrapper */}
+          {/* Enlarged Full-Width Horizontal Scroll Table Container */}
+          <div className="rounded-2xl bg-[#F4F8FC] border border-[#DCE7F3] p-1.5 sm:p-2">
             <div
               ref={gradebookTableScrollRef}
-              className="overflow-x-auto mx-6 sm:mx-7 rounded-xl bg-white border border-[#DCE7F3]"
+              className="overflow-x-auto rounded-xl bg-white border border-[#DCE7F3] min-h-[340px]"
             >
-              <table dir="rtl" className="w-full min-w-[560px] text-right text-xs border-collapse">
+              <table dir="rtl" className="w-full min-w-[640px] text-right text-xs sm:text-sm border-collapse">
                 <thead>
                   <tr className="bg-[#1F5AAA] text-white font-black border-b border-[#194B91]">
-                    <th className="sticky right-0 z-20 bg-[#1F5AAA] p-2.5 sm:p-3 min-w-[120px] sm:min-w-[145px] border-l border-[#3771BD] whitespace-nowrap">
+                    <th className="sticky right-0 z-20 bg-[#1F5AAA] px-3.5 py-3.5 sm:px-4 sm:py-4 min-w-[140px] sm:min-w-[170px] border-l border-[#3771BD] whitespace-nowrap">
                       اسم الطالب
                     </th>
-                    <th className="p-3 text-center whitespace-nowrap">الشهر</th>
-                    <th className="p-3 text-center whitespace-nowrap">عدد التسليمات</th>
-                    <th className="p-3 text-center whitespace-nowrap">المجموع</th>
-                    <th className="p-3 text-center whitespace-nowrap">النسبة%</th>
-                    <th className="p-3 text-center whitespace-nowrap">التقدير</th>
+                    <th className="px-3.5 py-3.5 sm:px-4 sm:py-4 text-center whitespace-nowrap">الشهر</th>
+                    <th className="px-3.5 py-3.5 sm:px-4 sm:py-4 text-center whitespace-nowrap">عدد التسليمات</th>
+                    <th className="px-3.5 py-3.5 sm:px-4 sm:py-4 text-center whitespace-nowrap">المجموع</th>
+                    <th className="px-3.5 py-3.5 sm:px-4 sm:py-4 text-center whitespace-nowrap">النسبة%</th>
+                    <th className="px-3.5 py-3.5 sm:px-4 sm:py-4 text-center whitespace-nowrap">التقدير</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200 text-slate-800">
@@ -2462,27 +2684,27 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
 
                     return (
                       <tr key={s.code ? `student-grade-${s.code}-${sIdx}` : `student-grade-idx-${sIdx}`} className="hover:bg-[#F8FAFD] transition">
-                        <td className="sticky right-0 z-10 bg-white p-3 font-bold text-[#1A3A5F] border-l border-slate-200 whitespace-nowrap">
+                        <td className="sticky right-0 z-10 bg-white px-3.5 py-3.5 sm:px-4 sm:py-4 font-bold text-[#1A3A5F] border-l border-slate-200 whitespace-nowrap">
                           {s.name}
                         </td>
-                        <td className="p-3 text-center whitespace-nowrap">
-                          <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold border ${isViewingArchive ? 'bg-amber-50 text-amber-900 border-amber-200' : 'bg-[#EEF5FC] text-[#1F5AAA] border-[#C6DCF2]'}`}>
+                        <td className="px-3.5 py-3.5 sm:px-4 sm:py-4 text-center whitespace-nowrap">
+                          <span className={`px-2.5 py-1 rounded-full text-[11px] sm:text-xs font-bold border ${isViewingArchive ? 'bg-amber-50 text-amber-900 border-amber-200' : 'bg-[#EEF5FC] text-[#1F5AAA] border-[#C6DCF2]'}`}>
                             {isViewingArchive ? `${selectedArchive?.month} (مؤرشف)` : `${activeMonth} (الشهر الحالي)`}
                           </span>
                         </td>
-                        <td className="p-3 text-center whitespace-nowrap">
-                          <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-[#F4F8FC] text-[#1A3A5F] border border-[#DCE7F3]">
+                        <td className="px-3.5 py-3.5 sm:px-4 sm:py-4 text-center whitespace-nowrap">
+                          <span className="px-3 py-1 rounded-full text-xs font-bold bg-[#F4F8FC] text-[#1A3A5F] border border-[#DCE7F3]">
                             {s.submissionsCount} تسليم
                           </span>
                         </td>
-                        <td className="p-3 text-center font-bold text-[#1A3A5F] whitespace-nowrap">
+                        <td className="px-3.5 py-3.5 sm:px-4 sm:py-4 text-center font-bold text-[#1A3A5F] whitespace-nowrap">
                           {s.totalEarned} / {s.totalPossible}
                         </td>
-                        <td className="p-3 text-center font-mono font-black text-sm text-[#1F5AAA] whitespace-nowrap">
+                        <td className="px-3.5 py-3.5 sm:px-4 sm:py-4 text-center font-mono font-black text-sm sm:text-base text-[#1F5AAA] whitespace-nowrap">
                           {s.percentage}%
                         </td>
-                        <td className="p-3 text-center whitespace-nowrap">
-                          <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold border ${badgeBg}`}>
+                        <td className="px-3.5 py-3.5 sm:px-4 sm:py-4 text-center whitespace-nowrap">
+                          <span className={`px-3 py-1 rounded-full text-[11px] sm:text-xs font-bold border ${badgeBg}`}>
                             {badgeText}
                           </span>
                         </td>
@@ -2712,7 +2934,11 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
           {/* Tab 1: إضافة سؤال */}
           <button
             type="button"
-            onClick={() => setActiveTab('create_question')}
+            onClick={() => {
+              setActiveTab('create_question');
+              setIsQuestionsArchiveView(false);
+              setActiveSidebarView('dashboard');
+            }}
             className={`min-h-[48px] py-1.5 px-1 rounded-2xl sm:rounded-full flex flex-col sm:flex-row items-center justify-center gap-0.5 sm:gap-1 transition-all cursor-pointer ${
               activeTab === 'create_question' && !isRecommendationsModalOpen
                 ? 'bg-[#EEF5FC] text-[#1F5AAA] font-black shadow-2xs border border-[#C6DCF2]'
@@ -2793,6 +3019,30 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
         onClose={() => setIsRecommendationsModalOpen(false)}
         session={session}
       />
+
+      {/* Auto-Archive Notification Modal */}
+      {archiveAlertOpen && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-sm w-full p-6 shadow-xl border border-[#DCE7F3] text-center font-['Cairo'] animate-in fade-in zoom-in-95 space-y-4">
+            <div className="w-12 h-12 rounded-2xl bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] flex items-center justify-center mx-auto">
+              <Archive className="w-6 h-6" />
+            </div>
+            <h3 className="text-base font-black text-[#1A3A5F]">
+              تم ترحيل الأسئلة الى الارشيف
+            </h3>
+            <p className="text-xs text-slate-600 font-semibold leading-relaxed">
+              تم نقل أسئلة اليوم تلقائياً إلى قسم أرشيف الأسئلة في القائمة الجانبية بعد بدء الطلاب بالإجابة عليها.
+            </p>
+            <button
+              type="button"
+              onClick={handleConfirmArchiveAlert}
+              className="w-full py-2.5 px-5 bg-[#1F5AAA] hover:bg-[#194B91] text-white rounded-xl text-xs font-black transition shadow-sm border border-[#194B91] cursor-pointer"
+            >
+              حسنا
+            </button>
+          </div>
+        </div>
+      )}
     </div>
     </div>
   );
