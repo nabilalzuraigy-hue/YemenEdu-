@@ -8,7 +8,6 @@ import {
   Clock,
   Download,
   Send,
-  Lock,
   Trash2,
   Bell,
   Sparkles,
@@ -32,6 +31,8 @@ import {
   Image as ImageIcon,
   RotateCcw,
   Minus,
+  Folder,
+  FolderOpen,
 } from 'lucide-react';
 import { collection, query, where, onSnapshot, addDoc, doc, serverTimestamp, setDoc, getDoc, updateDoc } from 'firebase/firestore';
 import { db, auth } from '../firebase/config';
@@ -64,6 +65,8 @@ import { GradeSheetPdfModal } from '../components/GradeSheetPdfModal';
 import { UnifiedSidebar } from '../components/UnifiedSidebar';
 import { ScheduleGridView, doesSlotMatchTeacher } from '../components/ScheduleGridView';
 import { TeacherRecommendationModal } from '../components/TeacherRecommendationModal';
+import { ComputerMonthFoldersGrid } from '../components/ComputerMonthFoldersGrid';
+import { getAcademicMonthFromTimestamp } from '../components/StudentSubjectGradeTables';
 import { formatArabicSchoolName, getSchoolPrincipalName, isGenericPrincipalSender, isSimulationAnnouncement } from '../utils/schoolDisplay';
 
 interface TeacherDashboardProps {
@@ -125,6 +128,12 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
   const [isRecommendationsModalOpen, setIsRecommendationsModalOpen] = useState<boolean>(false);
   const [activeSidebarView, setActiveSidebarView] = useState<string>('dashboard');
   const [isQuestionsArchiveView, setIsQuestionsArchiveView] = useState<boolean>(false);
+  const [openedQuestionsArchiveMonth, setOpenedQuestionsArchiveMonth] = useState<string | null>(null);
+  const [expandedArchiveDayKeys, setExpandedArchiveDayKeys] = useState<Record<string, boolean>>({});
+  const [isGradesArchiveFolderView, setIsGradesArchiveFolderView] = useState<boolean>(false);
+  const [openedGradesArchiveMonth, setOpenedGradesArchiveMonth] = useState<string | null>(null);
+  const [isCircularsArchiveFolderView, setIsCircularsArchiveFolderView] = useState<boolean>(false);
+  const [openedCircularsArchiveMonth, setOpenedCircularsArchiveMonth] = useState<string | null>(null);
   const [answeredQuestionIdsFromGrades, setAnsweredQuestionIdsFromGrades] = useState<Set<string>>(() => new Set());
   const [answeredQuestionIdsFromSubs, setAnsweredQuestionIdsFromSubs] = useState<Set<string>>(() => new Set());
   const [locallyArchivedQuestionIds, setLocallyArchivedQuestionIds] = useState<Record<string, number>>(() => {
@@ -162,22 +171,37 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
     if (view === 'dashboard') {
       setActiveTab('create_question');
       setIsQuestionsArchiveView(false);
+      setOpenedQuestionsArchiveMonth(null);
+      setIsGradesArchiveFolderView(false);
+      setOpenedGradesArchiveMonth(null);
+      setIsCircularsArchiveFolderView(false);
+      setOpenedCircularsArchiveMonth(null);
       setSelectedMonthView('active');
     } else if (view === 'schedule') {
       setActiveTab('schedule');
       setIsQuestionsArchiveView(false);
+      setIsGradesArchiveFolderView(false);
+      setIsCircularsArchiveFolderView(false);
     } else if (view === 'archive_questions') {
       setActiveTab('create_question');
       setIsQuestionsArchiveView(true);
+      setOpenedQuestionsArchiveMonth(null);
+      setExpandedArchiveDayKeys({});
+      setIsGradesArchiveFolderView(false);
+      setIsCircularsArchiveFolderView(false);
     } else if (view === 'archive_grades') {
       setActiveTab('gradebook');
       setIsQuestionsArchiveView(false);
-      if (archivedGradebooks.length > 0) {
-        setSelectedMonthView(archivedGradebooks[0].id);
-      }
+      setIsGradesArchiveFolderView(true);
+      setOpenedGradesArchiveMonth(null);
+      setIsCircularsArchiveFolderView(false);
+      setSelectedMonthView('active');
     } else if (view === 'archive_circulars') {
       setActiveTab('announcements');
       setIsQuestionsArchiveView(false);
+      setIsGradesArchiveFolderView(false);
+      setIsCircularsArchiveFolderView(true);
+      setOpenedCircularsArchiveMonth(null);
     }
   };
 
@@ -605,7 +629,6 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
   const [qText, setQText] = useState('');
   const [options, setOptions] = useState<string[]>(['', '', '', '']);
   const [correctOptionIndex, setCorrectOptionIndex] = useState<number>(0);
-  const [qPoints, setQPoints] = useState<number>(5);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
 
   // Quick Lesson Questions Upload & Daily Quota (5 questions/day limit, zero technical jargon)
@@ -1299,9 +1322,22 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
     }
   };
 
-  // 1. Submit New Manual MCQ Question (Only Multiple Choice, No Essay, No Photos)
+  const todayManualQuestionsCount = questions.filter((q) => {
+    const ts = (q as any).timestamp || getQuestionTimestamp(q) || 0;
+    const isToday = formatDayKeyFromTimestamp(ts) === todayDateKey;
+    if (!isToday) return false;
+    return (q as any).creationMode === 'manual' || !q.questionKind;
+  }).length;
+
+  // 1. Submit New Manual MCQ Question (Only Multiple Choice, Fixed 5 points, Max 5 questions)
   const handleCreateQuestion = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (todayManualQuestionsCount >= 5) {
+      setToastMsg('وصلت للحد الأقصى: عدد الأسئلة اليدوية لا يزيد عن 5 أسئلة.');
+      setTimeout(() => setToastMsg(null), 3500);
+      return;
+    }
+
     if (!qText.trim()) {
       setToastMsg('يرجى كتابة نص السؤال.');
       setTimeout(() => setToastMsg(null), 3500);
@@ -1337,12 +1373,13 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
       grade: (session.grade as '7' | '8' | '9') || '8',
       subject: session.subject || 'العلوم',
       type: 'سؤال موضوعي',
+      creationMode: 'manual',
       text: cleanQText,
       questionText: cleanQText,
       options,
       correctIndex: correctOptionIndex,
       correctOption: correctOptionIndex,
-      points: Number(qPoints) || 5,
+      points: 5,
       teacherName: session.name,
       teacherId: auth.currentUser?.uid || session.code,
       isPublished: true,
@@ -1573,6 +1610,8 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
               type="button"
               onClick={() => {
                 setActiveTab('announcements');
+                setIsCircularsArchiveFolderView(false);
+                setOpenedCircularsArchiveMonth(null);
                 setTeacherCirculars((prev) => prev.map((c) => ({ ...c, isRead: true })));
               }}
               className="relative p-2.5 rounded-2xl bg-[#1F5AAA] hover:bg-[#194B91] text-white border border-[#194B91] shadow-sm transition cursor-pointer flex items-center gap-2"
@@ -1610,7 +1649,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
         </div>
       )}
 
-      {/* TAB 1: ADD QUESTION / QUESTIONS ARCHIVE */}
+      {/* TAB 1: ADD QUESTION / QUESTIONS ARCHIVE (Computer Folders + Collapsible Date Accordions) */}
       {activeTab === 'create_question' && isQuestionsArchiveView && (
         <div className="space-y-5">
           {(() => {
@@ -1632,8 +1671,20 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
             );
             combinedArchived.sort((a, b) => getQuestionTimestamp(b) - getQuestionTimestamp(a));
 
+            const resolveQuestionMonth = (q: Question): string => {
+              if (q.month && (ACADEMIC_MONTHS as readonly string[]).includes(q.month)) {
+                return q.month;
+              }
+              const ts = (q as any).timestamp || getQuestionTimestamp(q) || Date.now();
+              return getAcademicMonthFromTimestamp(ts);
+            };
+
+            const monthQuestions = openedQuestionsArchiveMonth
+              ? combinedArchived.filter((q) => resolveQuestionMonth(q) === openedQuestionsArchiveMonth)
+              : [];
+
             const dayGroupMap = new Map<string, Question[]>();
-            for (const q of combinedArchived) {
+            for (const q of monthQuestions) {
               const ts = (q as any).timestamp || getQuestionTimestamp(q) || Date.now();
               const dKey = formatDayKeyFromTimestamp(ts);
               const arr = dayGroupMap.get(dKey) || [];
@@ -1641,6 +1692,14 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
               dayGroupMap.set(dKey, arr);
             }
             const dayGroups = Array.from(dayGroupMap.entries()).sort((a, b) => b[0].localeCompare(a[0]));
+            const staggerDelays = [
+              'delay-[0ms]',
+              'delay-[45ms]',
+              'delay-[90ms]',
+              'delay-[135ms]',
+              'delay-[180ms]',
+              'delay-[225ms]',
+            ];
 
             return (
               <>
@@ -1654,129 +1713,215 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
                         أرشيف الأسئلة ({combinedArchived.length})
                       </h3>
                       <p className="text-xs text-slate-600 font-semibold mt-0.5">
-                        يتم ترحيل أسئلة اليوم تلقائياً إلى الأرشيف عند بدء الطلاب بالإجابة عليها، ومرتبة يومياً مع فواصل واضحة
+                        الأسئلة المؤرشفة منظمة في مجلدات الشهور ومطوية حسب تاريخ الإنشاء
                       </p>
                     </div>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIsQuestionsArchiveView(false);
-                      setActiveSidebarView('dashboard');
-                      setSelectedMonthView('active');
-                    }}
-                    className="px-4 py-2 rounded-xl bg-[#1F5AAA] hover:bg-[#194B91] text-white text-xs font-black flex items-center gap-1.5 transition shadow-sm cursor-pointer border border-[#194B91]"
-                  >
-                    <ArrowRight className="w-4 h-4" />
-                    <span>العودة إلى إضافة سؤال</span>
-                  </button>
+                  <div className="flex items-center gap-2">
+                    {openedQuestionsArchiveMonth && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setOpenedQuestionsArchiveMonth(null);
+                          setExpandedArchiveDayKeys({});
+                        }}
+                        className="px-3.5 py-2 rounded-xl bg-[#EEF5FC] hover:bg-[#DCEAF9] text-[#1F5AAA] border border-[#C6DCF2] text-xs font-black flex items-center gap-1.5 transition cursor-pointer"
+                      >
+                        <ArrowRight className="w-4 h-4" />
+                        <span>العودة لمجلدات الشهور</span>
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsQuestionsArchiveView(false);
+                        setOpenedQuestionsArchiveMonth(null);
+                        setExpandedArchiveDayKeys({});
+                        setActiveSidebarView('dashboard');
+                        setSelectedMonthView('active');
+                      }}
+                      className="px-4 py-2 rounded-xl bg-[#1F5AAA] hover:bg-[#194B91] text-white text-xs font-black flex items-center gap-1.5 transition shadow-sm cursor-pointer border border-[#194B91]"
+                    >
+                      <ArrowRight className="w-4 h-4" />
+                      <span>العودة إلى إضافة سؤال</span>
+                    </button>
+                  </div>
                 </div>
 
-                {dayGroups.length === 0 ? (
-                  <div className="bg-white rounded-2xl p-8 border border-[#DCE7F3] text-center shadow-sm">
-                    <Archive className="w-12 h-12 text-[#9BBEDF] mx-auto mb-3" />
-                    <h4 className="font-black text-base text-[#1A3A5F]">
-                      لا توجد أسئلة مؤرشفة حالياً
-                    </h4>
-                    <p className="text-xs text-slate-600 font-medium mt-1">
-                      ستنتقل أسئلة اليوم تلقائياً إلى هنا بمجرد بدء بعض الطلاب بالإجابة عليها.
-                    </p>
-                  </div>
+                {!openedQuestionsArchiveMonth ? (
+                  <ComputerMonthFoldersGrid
+                    currentMonth={activeMonth}
+                    getCountForMonth={(m) =>
+                      combinedArchived.filter((q) => resolveQuestionMonth(q) === m).length
+                    }
+                    unitLabel="سؤال"
+                    headerTitle="مجلدات أرشيف الأسئلة الشهرية — اضغط لفتح المجلد:"
+                    onSelectMonth={(monthName) => {
+                      setOpenedQuestionsArchiveMonth(monthName);
+                      setExpandedArchiveDayKeys({});
+                    }}
+                  />
                 ) : (
-                  <div className="space-y-6">
-                    {dayGroups.map(([dayKey, dayQuestions], dayIdx) => (
-                      <React.Fragment key={dayKey}>
-                        <div className="space-y-3">
-                          <div className="flex flex-wrap items-center justify-between gap-2 bg-[#EEF5FC] border border-[#C6DCF2] rounded-xl px-4 py-2.5">
-                            <div className="flex items-center gap-2">
-                              <Calendar className="w-4 h-4 text-[#1F5AAA]" />
-                              <span className="text-xs sm:text-sm font-black text-[#1A3A5F]">
-                                {formatArabicDayLabel(dayKey)}
-                              </span>
-                            </div>
-                            <span className="px-2.5 py-0.5 rounded-full bg-white text-[#1F5AAA] border border-[#C6DCF2] text-[11px] font-black">
-                              {dayQuestions.length} أسئلة
-                            </span>
-                          </div>
+                  <div className="space-y-4">
+                    <div className="bg-[#F4F8FC] border border-[#DCE7F3] rounded-2xl px-4 py-3 flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <FolderOpen className="w-5 h-5 text-amber-600 shrink-0" />
+                        <span className="text-xs sm:text-sm font-black text-[#1A3A5F]">
+                          مجلد شهر ({openedQuestionsArchiveMonth})
+                        </span>
+                      </div>
+                      <span className="text-xs font-bold text-[#1F5AAA] tabular-nums">
+                        {monthQuestions.length} سؤال في هذا الشهر
+                      </span>
+                    </div>
 
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            {dayQuestions.map((q, qIdx) => (
-                              <div
-                                key={q.id ? `arch-q-${q.id}-${qIdx}` : `arch-q-idx-${dayKey}-${qIdx}`}
-                                className="bg-white rounded-2xl p-5 border border-[#DCE7F3] shadow-sm flex flex-col justify-between"
+                    {dayGroups.length === 0 ? (
+                      <div className="bg-white rounded-2xl p-8 border border-[#DCE7F3] text-center shadow-sm">
+                        <Folder className="w-12 h-12 text-[#9BBEDF] mx-auto mb-3" />
+                        <h4 className="font-black text-base text-[#1A3A5F]">
+                          مجلد شهر ({openedQuestionsArchiveMonth}) فارغ حالياً
+                        </h4>
+                        <p className="text-xs text-slate-600 font-medium mt-1">
+                          تنتقل أسئلة اليوم تلقائياً إلى هنا عند بدء الطلاب بالإجابة عليها.
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="space-y-3">
+                        {dayGroups.map(([dayKey, dayQuestions]) => {
+                          const isExpanded = Boolean(expandedArchiveDayKeys[dayKey]);
+                          return (
+                            <div
+                              key={dayKey}
+                              className="bg-white rounded-2xl border border-[#DCE7F3] shadow-2xs overflow-hidden transition-colors"
+                            >
+                              {/* Collapsible Date Trigger Header (Collapsed by default) */}
+                              <button
+                                type="button"
+                                aria-expanded={isExpanded}
+                                onClick={() =>
+                                  setExpandedArchiveDayKeys((prev) => ({
+                                    ...prev,
+                                    [dayKey]: !prev[dayKey],
+                                  }))
+                                }
+                                className={`w-full px-4 py-3.5 flex items-center justify-between gap-3 text-right transition-colors cursor-pointer ${
+                                  isExpanded
+                                    ? 'bg-[#EEF5FC] border-b border-[#C6DCF2]'
+                                    : 'bg-white hover:bg-[#F4F8FC]'
+                                }`}
                               >
-                                <div>
-                                  <div className="flex items-center justify-between mb-2">
-                                    <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2]">
-                                      الصف {q.grade === '9' ? 'التاسع' : q.grade === '8' ? 'الثامن' : 'السابع'} • {q.subject}
-                                    </span>
-                                    <div className="flex items-center gap-1.5">
-                                      <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full border bg-purple-50 text-purple-800 border-purple-200">
-                                        [{q.questionKind ? QUESTION_KIND_LABELS[q.questionKind] : 'سؤال موضوعي'}]
-                                      </span>
-                                      <span className="text-xs font-bold text-[#1A3A5F] bg-[#F4F8FC] px-2 py-0.5 rounded-md border border-[#DCE7F3]">
-                                        {q.points || 5} درجات
-                                      </span>
-                                    </div>
-                                  </div>
+                                <div className="flex items-center gap-2.5 min-w-0">
+                                  {isExpanded ? (
+                                    <FolderOpen className="w-5 h-5 text-amber-600 shrink-0" />
+                                  ) : (
+                                    <Folder className="w-5 h-5 text-amber-500 fill-amber-200/60 shrink-0" />
+                                  )}
+                                  <span className="text-xs sm:text-sm font-black text-[#1A3A5F] truncate">
+                                    {formatArabicDayLabel(dayKey)}
+                                  </span>
+                                </div>
 
-                                  <h4 className="font-bold text-[#1A3A5F] text-xs sm:text-sm mb-2">{q.questionText || q.text}</h4>
+                                <div className="flex items-center gap-2.5 shrink-0">
+                                  <span className="text-xs font-black text-[#1F5AAA] tabular-nums">
+                                    {dayQuestions.length} أسئلة
+                                  </span>
+                                  <ChevronDown
+                                    className={`w-4 h-4 text-[#1F5AAA] transition-transform duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none ${
+                                      isExpanded ? 'rotate-180' : ''
+                                    }`}
+                                  />
+                                </div>
+                              </button>
 
-                                  {q.options && (
-                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 text-xs text-slate-800 my-2">
-                                      {q.options.map((opt, i) => (
+                              {/* Smooth Staggered Accordion Body */}
+                              <div
+                                className={`grid transition-[grid-template-rows,opacity] duration-350 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none ${
+                                  isExpanded ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'
+                                }`}
+                              >
+                                <div className="overflow-hidden">
+                                  <div className="p-3 sm:p-4 bg-[#F8FAFD] grid grid-cols-1 md:grid-cols-2 gap-3.5">
+                                    {dayQuestions.map((q, qIdx) => {
+                                      const delayClass = isExpanded
+                                        ? staggerDelays[Math.min(qIdx, staggerDelays.length - 1)]
+                                        : 'delay-[0ms]';
+                                      return (
                                         <div
-                                          key={`arch-opt-${q.id || qIdx}-${i}`}
-                                          className={`p-1.5 rounded-lg border text-[11px] ${
-                                            q.correctIndex === i || q.correctOption === i
-                                              ? 'bg-emerald-50 border-emerald-300 font-bold text-emerald-900'
-                                              : 'bg-[#F8FAFD] border-slate-200'
+                                          key={q.id ? `arch-q-${q.id}-${qIdx}` : `arch-q-idx-${dayKey}-${qIdx}`}
+                                          className={`bg-white rounded-2xl p-4 sm:p-5 border border-[#DCE7F3] shadow-2xs flex flex-col justify-between transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none ${delayClass} ${
+                                            isExpanded
+                                              ? 'opacity-100 translate-y-0'
+                                              : 'opacity-0 translate-y-2'
                                           }`}
                                         >
-                                          <span>{i === 0 ? 'أ' : i === 1 ? 'ب' : i === 2 ? 'ج' : 'د'}: </span>
-                                          {opt}
-                                        </div>
-                                      ))}
-                                    </div>
-                                  )}
-                                </div>
+                                          <div>
+                                            <div className="flex items-center justify-between gap-2 mb-2 text-[11px] font-bold text-[#5C7085]">
+                                              <span>
+                                                الصف {q.grade === '9' ? 'التاسع' : q.grade === '8' ? 'الثامن' : 'السابع'} • {q.subject}
+                                              </span>
+                                              <span className="text-[#1A3A5F] font-black tabular-nums">
+                                                {q.questionKind ? QUESTION_KIND_LABELS[q.questionKind] : 'سؤال موضوعي'} • {q.points || 5} درجات
+                                              </span>
+                                            </div>
 
-                                <div className="pt-3 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-600">
-                                  <div className="flex flex-wrap items-center gap-2">
-                                    <span className="font-bold text-[#1A3A5F]">المعلم: {q.teacherName || session.name}</span>
-                                    <span className="flex items-center gap-1 text-[#1F5AAA] font-bold bg-[#EEF5FC] px-2 py-0.5 rounded-md border border-[#C6DCF2]">
-                                      <Clock className="w-3.5 h-3.5 text-[#1F5AAA]" />
-                                      <span>{q.createdAtFormatted || formatArabicDateTime(q.createdAt || q.timestamp)}</span>
-                                    </span>
+                                            <h4 className="font-bold text-[#1A3A5F] text-xs sm:text-sm mb-2">
+                                              {q.questionText || q.text}
+                                            </h4>
+
+                                            {q.options && (
+                                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 text-xs text-slate-800 my-2">
+                                                {q.options.map((opt, i) => (
+                                                  <div
+                                                    key={`arch-opt-${q.id || qIdx}-${i}`}
+                                                    className={`p-1.5 rounded-lg border text-[11px] ${
+                                                      q.correctIndex === i || q.correctOption === i
+                                                        ? 'bg-emerald-50 border-emerald-300 font-bold text-emerald-900'
+                                                        : 'bg-[#F8FAFD] border-slate-200'
+                                                    }`}
+                                                  >
+                                                    <span>{i === 0 ? 'أ' : i === 1 ? 'ب' : i === 2 ? 'ج' : 'د'}: </span>
+                                                    {opt}
+                                                  </div>
+                                                ))}
+                                              </div>
+                                            )}
+                                          </div>
+
+                                          <div className="pt-3 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-600">
+                                            <div className="flex flex-wrap items-center gap-2">
+                                              <span className="font-bold text-[#1A3A5F]">
+                                                المعلم: {q.teacherName || session.name}
+                                              </span>
+                                              <span className="flex items-center gap-1 text-[#1F5AAA] font-bold">
+                                                <Clock className="w-3.5 h-3.5 text-[#1F5AAA]" />
+                                                <span>
+                                                  {q.createdAtFormatted || formatArabicDateTime(q.createdAt || q.timestamp)}
+                                                </span>
+                                              </span>
+                                            </div>
+                                            {questions.some((activeQ) => activeQ.id === q.id) && (
+                                              <button
+                                                type="button"
+                                                onClick={async () => {
+                                                  await appDataService.deleteQuestion(q.id);
+                                                }}
+                                                className="text-rose-700 hover:text-rose-900 font-bold cursor-pointer"
+                                              >
+                                                حذف السؤال
+                                              </button>
+                                            )}
+                                          </div>
+                                        </div>
+                                      );
+                                    })}
                                   </div>
-                                  {questions.some((activeQ) => activeQ.id === q.id) && (
-                                    <button
-                                      type="button"
-                                      onClick={async () => {
-                                        await appDataService.deleteQuestion(q.id);
-                                      }}
-                                      className="text-rose-700 hover:text-rose-900 font-bold cursor-pointer"
-                                    >
-                                      حذف السؤال
-                                    </button>
-                                  )}
                                 </div>
                               </div>
-                            ))}
-                          </div>
-                        </div>
-
-                        {/* فاصل واضح بين أسئلة اليوم واليوم التالي */}
-                        {dayIdx < dayGroups.length - 1 && (
-                          <div className="relative flex items-center justify-center py-3" role="separator">
-                            <div className="w-full border-t-2 border-dashed border-[#9BBEDF]" />
-                            <span className="absolute bg-[#EDF0F5] px-4 py-1 rounded-full border border-[#9BBEDF] text-[11px] font-black text-[#1F5AAA] shadow-2xs whitespace-nowrap">
-                              فاصل بين أسئلة ({formatArabicDayLabel(dayKey).split('—')[0].trim()}) و ({formatArabicDayLabel(dayGroups[dayIdx + 1][0]).split('—')[0].trim()})
-                            </span>
-                          </div>
-                        )}
-                      </React.Fragment>
-                    ))}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                 )}
               </>
@@ -1841,7 +1986,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
           {/* Quick Lesson Upload & 5 Ready Questions Section (Only in Active Month View) */}
           {!isViewingArchive && (
             <div className="bg-white rounded-2xl p-5 sm:p-6 shadow-sm border border-[#DCE7F3] space-y-4">
-              {/* Top Daily Quota Banner */}
+              {/* Top Daily Lesson Banner */}
               <div
                 className={`rounded-xl px-4 py-3 border flex items-center justify-between gap-3 ${
                   dailyQuotaUsed
@@ -1860,14 +2005,9 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
                       ? 'جاري التحقق من رصيد الأسئلة اليومي...'
                       : dailyQuotaUsed
                       ? QUOTA_EXHAUSTED_MESSAGE
-                      : 'تبقى لك 5 أسئلة اليوم'}
+                      : 'لديك 3 أسئلة في الدرس'}
                   </span>
                 </div>
-                {!dailyQuotaUsed && !dailyQuotaLoading && (
-                  <span className="px-2.5 py-1 rounded-lg bg-white text-[#1F5AAA] text-[11px] font-black border border-[#C6DCF2] shrink-0">
-                    5 / 5 متاح
-                  </span>
-                )}
               </div>
 
               {/* Hidden file inputs */}
@@ -2280,7 +2420,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
 
           {/* Manual Question Creation Form (Only in Active Month View) */}
           {!isViewingArchive && (
-            <div className="bg-white rounded-2xl p-6 shadow-sm border border-[#DCE7F3]">
+            <div className="bg-white rounded-2xl p-5 sm:p-6 shadow-sm border border-[#DCE7F3]">
               <div className="border-b border-slate-200 pb-3 mb-4 flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <h3 className="font-black text-base text-[#1A3A5F] flex items-center gap-2">
@@ -2288,106 +2428,94 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
                     إضافة سؤال يدوي جديد لشهر ({activeMonth})
                   </h3>
                   <p className="text-xs text-slate-600 font-semibold mt-0.5">
-                    سؤال تفاعلي باختيار من متعدد
+                    سؤال تفاعلي باختيار من متعدد • الدرجة: 5 درجات لكل سؤال • الحد الأقصى: 5 أسئلة ({todayManualQuestionsCount} / 5)
                   </p>
                 </div>
-                <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2]">
-                  شهر {activeMonth} (نشط)
+                <span className="text-xs font-bold text-[#1F5AAA] tabular-nums">
+                  {todayManualQuestionsCount} / 5 أسئلة
                 </span>
               </div>
 
-              <form onSubmit={handleCreateQuestion} className="space-y-4">
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  <div className="p-3 bg-[#F4F8FC] rounded-xl border border-[#DCE7F3] flex items-center gap-2">
-                    <Lock className="w-4 h-4 text-[#1F5AAA]" />
-                    <span className="text-xs font-bold text-[#1A3A5F]">الصف: {session.grade || '8'}</span>
-                  </div>
-                  <div className="p-3 bg-[#F4F8FC] rounded-xl border border-[#DCE7F3] flex items-center gap-2">
-                    <Lock className="w-4 h-4 text-[#1F5AAA]" />
-                    <span className="text-xs font-bold text-[#1A3A5F]">المادة: {session.subject || 'العلوم'}</span>
-                  </div>
+              {todayManualQuestionsCount >= 5 ? (
+                <div className="p-4 rounded-xl bg-amber-50 border border-amber-300 text-amber-950 text-xs font-black flex items-center gap-2">
+                  <AlertCircle className="w-5 h-5 text-amber-600 shrink-0" />
+                  <span>وصلت للحد الأقصى: عدد الأسئلة اليدوية اليوم لا يزيد عن 5 أسئلة.</span>
+                </div>
+              ) : (
+                <form onSubmit={handleCreateQuestion} className="space-y-4">
                   <div>
-                    <label className="block text-xs font-bold text-[#1A3A5F] mb-1">درجة السؤال:</label>
-                    <input
-                      type="number"
-                      min={1}
-                      max={50}
-                      value={qPoints}
-                      onChange={(e) => setQPoints(Number(e.target.value))}
-                      className="w-full px-3 py-2 text-xs rounded-xl border border-[#DCE7F3] font-bold focus:outline-[#1F5AAA] bg-white text-[#1A3A5F]"
-                    />
+                    <label className="block text-xs font-bold text-[#1A3A5F] mb-1">نص السؤال:</label>
+                    <textarea
+                      rows={3}
+                      value={qText}
+                      onChange={(e) => setQText(e.target.value)}
+                      placeholder="اكتب صيغة السؤال بوضوح..."
+                      className="w-full p-3 text-xs rounded-xl border border-[#DCE7F3] focus:outline-[#1F5AAA] bg-white text-[#1A3A5F]"
+                      required
+                    ></textarea>
                   </div>
-                </div>
 
-                <div>
-                  <label className="block text-xs font-bold text-[#1A3A5F] mb-1">نص السؤال:</label>
-                  <textarea
-                    rows={3}
-                    value={qText}
-                    onChange={(e) => setQText(e.target.value)}
-                    placeholder="اكتب صيغة السؤال بوضوح..."
-                    className="w-full p-3 text-xs rounded-xl border border-[#DCE7F3] focus:outline-[#1F5AAA] bg-white text-[#1A3A5F]"
-                    required
-                  ></textarea>
-                </div>
+                  <div className="bg-[#F4F8FC] p-4 rounded-xl border border-[#DCE7F3] space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-black text-[#1A3A5F]">
+                        الخيارات الأربعة (حدد الدائرة للإجابة الصحيحة):
+                      </span>
+                      <span className="text-[11px] text-[#1F5AAA] font-bold">
+                        الخيار رقم ({correctOptionIndex + 1}) هو الصحيح
+                      </span>
+                    </div>
 
-                <div className="bg-[#F4F8FC] p-4 rounded-xl border border-[#DCE7F3] space-y-3">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-black text-[#1A3A5F]">
-                      الخيارات الأربعة (حدد الدائرة للإجابة الصحيحة):
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      {options.map((opt, idx) => (
+                        <div
+                          key={`option-${idx}`}
+                          className={`flex items-center gap-2 p-2 rounded-xl border transition ${
+                            correctOptionIndex === idx
+                              ? 'bg-[#EEF5FC] border-[#9BBEDF]'
+                              : 'bg-white border-[#DCE7F3]'
+                          }`}
+                        >
+                          <input
+                            type="radio"
+                            name="correctOption"
+                            checked={correctOptionIndex === idx}
+                            onChange={() => setCorrectOptionIndex(idx)}
+                            className="w-4 h-4 text-[#1F5AAA] accent-[#1F5AAA] cursor-pointer"
+                          />
+                          <span className="text-xs font-bold text-slate-600 w-5">
+                            {idx === 0 ? 'أ' : idx === 1 ? 'ب' : idx === 2 ? 'ج' : 'د'}:
+                          </span>
+                          <input
+                            type="text"
+                            value={opt}
+                            onChange={(e) => {
+                              const updated = [...options];
+                              updated[idx] = e.target.value;
+                              setOptions(updated);
+                            }}
+                            placeholder={`نص الخيار (${idx + 1})`}
+                            className="w-full text-xs bg-transparent focus:outline-none text-[#1A3A5F] font-semibold"
+                            required
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-3 pt-2">
+                    <span className="text-xs font-bold text-slate-600">
+                      درجة السؤال: <strong className="text-[#1F5AAA]">5 درجات</strong>
                     </span>
-                    <span className="text-[11px] text-[#1F5AAA] font-bold bg-[#EEF5FC] px-2.5 py-0.5 rounded-full border border-[#C6DCF2]">
-                      الخيار رقم ({correctOptionIndex + 1}) هو الصحيح
-                    </span>
+                    <button
+                      type="submit"
+                      className="py-2.5 px-6 bg-[#1F5AAA] hover:bg-[#194B91] text-white text-xs font-black rounded-xl transition shadow-sm flex items-center gap-2 cursor-pointer border border-[#194B91]"
+                    >
+                      <Send className="w-4 h-4" />
+                      <span>حفظ السؤال لشهر ({activeMonth})</span>
+                    </button>
                   </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    {options.map((opt, idx) => (
-                      <div
-                        key={`option-${idx}`}
-                        className={`flex items-center gap-2 p-2 rounded-xl border transition ${
-                          correctOptionIndex === idx
-                            ? 'bg-[#EEF5FC] border-[#9BBEDF]'
-                            : 'bg-white border-[#DCE7F3]'
-                        }`}
-                      >
-                        <input
-                          type="radio"
-                          name="correctOption"
-                          checked={correctOptionIndex === idx}
-                          onChange={() => setCorrectOptionIndex(idx)}
-                          className="w-4 h-4 text-[#1F5AAA] accent-[#1F5AAA] cursor-pointer"
-                        />
-                        <span className="text-xs font-bold text-slate-600 w-5">
-                          {idx === 0 ? 'أ' : idx === 1 ? 'ب' : idx === 2 ? 'ج' : 'د'}:
-                        </span>
-                        <input
-                          type="text"
-                          value={opt}
-                          onChange={(e) => {
-                            const updated = [...options];
-                            updated[idx] = e.target.value;
-                            setOptions(updated);
-                          }}
-                          placeholder={`نص الخيار (${idx + 1})`}
-                          className="w-full text-xs bg-transparent focus:outline-none text-[#1A3A5F] font-semibold"
-                          required
-                        />
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="flex justify-end pt-2">
-                  <button
-                    type="submit"
-                    className="py-2.5 px-6 bg-[#1F5AAA] hover:bg-[#194B91] text-white text-xs font-black rounded-xl transition shadow-sm flex items-center gap-2 cursor-pointer border border-[#194B91]"
-                  >
-                    <Send className="w-4 h-4" />
-                    <span>حفظ السؤال لشهر ({activeMonth})</span>
-                  </button>
-                </div>
-              </form>
+                </form>
+              )}
             </div>
           )}
 
@@ -2534,8 +2662,102 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
       )}
 
       {/* TAB 2: MY STUDENTS' GRADEBOOK */}
-      {activeTab === 'gradebook' && (
+      {activeTab === 'gradebook' && isGradesArchiveFolderView && !openedGradesArchiveMonth && (
+        <div className="space-y-4">
+          <div className="bg-white rounded-2xl p-4 sm:p-5 border border-[#DCE7F3] shadow-sm flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="p-2.5 bg-[#EEF5FC] text-[#1F5AAA] rounded-xl border border-[#C6DCF2]">
+                <Archive className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="font-black text-base text-[#1A3A5F]">أرشيف كشوفات الدرجات</h3>
+                <p className="text-xs text-slate-600 font-semibold mt-0.5">
+                  اختر مجلد الشهر لاستعراض كشف الدرجات المؤرشف وتنزيله بصيغة PDF
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setIsGradesArchiveFolderView(false);
+                setOpenedGradesArchiveMonth(null);
+                setSelectedMonthView('active');
+                setActiveSidebarView('dashboard');
+              }}
+              className="px-4 py-2 rounded-xl bg-[#1F5AAA] hover:bg-[#194B91] text-white text-xs font-black flex items-center gap-1.5 transition shadow-sm cursor-pointer border border-[#194B91]"
+            >
+              <ArrowRight className="w-4 h-4" />
+              <span>العودة للكشف النشط</span>
+            </button>
+          </div>
+
+          <ComputerMonthFoldersGrid
+            currentMonth={activeMonth}
+            getCountForMonth={(m) => archivedGradebooks.filter((a) => a.month === m).length}
+            unitLabel="كشف"
+            headerTitle="مجلدات أرشيف الدرجات الشهرية — اضغط لفتح المجلد:"
+            onSelectMonth={(monthName) => {
+              setOpenedGradesArchiveMonth(monthName);
+              const match = archivedGradebooks.find((a) => a.month === monthName);
+              if (match) setSelectedMonthView(match.id);
+            }}
+          />
+        </div>
+      )}
+
+      {activeTab === 'gradebook' && isGradesArchiveFolderView && openedGradesArchiveMonth && !archivedGradebooks.some((a) => a.month === openedGradesArchiveMonth) && (
+        <div className="space-y-4">
+          <div className="bg-white rounded-2xl p-4 sm:p-5 border border-[#DCE7F3] shadow-sm flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <FolderOpen className="w-5 h-5 text-amber-600" />
+              <h3 className="font-black text-base text-[#1A3A5F]">
+                مجلد درجات شهر ({openedGradesArchiveMonth})
+              </h3>
+            </div>
+            <button
+              type="button"
+              onClick={() => setOpenedGradesArchiveMonth(null)}
+              className="px-3.5 py-2 rounded-xl bg-[#EEF5FC] hover:bg-[#DCEAF9] text-[#1F5AAA] border border-[#C6DCF2] text-xs font-black flex items-center gap-1.5 transition cursor-pointer"
+            >
+              <ArrowRight className="w-4 h-4" />
+              <span>العودة لمجلدات الدرجات</span>
+            </button>
+          </div>
+          <div className="bg-white rounded-2xl p-8 border border-[#DCE7F3] text-center shadow-sm">
+            <Folder className="w-12 h-12 text-[#9BBEDF] mx-auto mb-3" />
+            <h4 className="font-black text-base text-[#1A3A5F]">
+              مجلد شهر ({openedGradesArchiveMonth}) فارغ حالياً
+            </h4>
+            <p className="text-xs text-slate-600 font-medium mt-1">
+              لم يتم ترحيل أو أرشفة كشف درجات لهذا الشهر بعد.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'gradebook' && (!isGradesArchiveFolderView || (openedGradesArchiveMonth && archivedGradebooks.some((a) => a.month === openedGradesArchiveMonth))) && (
         <div className="bg-white rounded-2xl p-6 shadow-sm border border-[#DCE7F3] space-y-4">
+          {isGradesArchiveFolderView && openedGradesArchiveMonth && (
+            <div className="bg-[#F4F8FC] border border-[#DCE7F3] rounded-xl px-4 py-2.5 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <FolderOpen className="w-4 h-4 text-amber-600" />
+                <span className="text-xs font-black text-[#1A3A5F]">
+                  أرشيف مجلد شهر ({openedGradesArchiveMonth})
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setOpenedGradesArchiveMonth(null);
+                  setSelectedMonthView('active');
+                }}
+                className="px-3 py-1 rounded-lg bg-white hover:bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] text-xs font-black flex items-center gap-1 cursor-pointer"
+              >
+                <ArrowRight className="w-3.5 h-3.5" />
+                <span>العودة لمجلدات الدرجات</span>
+              </button>
+            </div>
+          )}
           <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 border-b border-slate-200 pb-4">
             <div>
               <h3 className="font-black text-base text-[#1A3A5F] flex items-center gap-2">
@@ -2596,7 +2818,11 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
                 </span>
               </div>
               <button
-                onClick={() => setSelectedMonthView('active')}
+                onClick={() => {
+                  setIsGradesArchiveFolderView(false);
+                  setOpenedGradesArchiveMonth(null);
+                  setSelectedMonthView('active');
+                }}
                 className="px-3 py-1 bg-white hover:bg-amber-100 text-amber-950 border border-amber-300 rounded-lg text-xs font-bold transition cursor-pointer"
               >
                 العودة للكشف النشط ({activeMonth})
@@ -2786,90 +3012,173 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
       )}
 
 
-      {/* TAB 4: CIRCULARS */}
-      {activeTab === 'announcements' && (
+      {/* TAB 4: CIRCULARS / CIRCULARS ARCHIVE FOLDERS */}
+      {activeTab === 'announcements' && isCircularsArchiveFolderView && !openedCircularsArchiveMonth && (
         <div className="space-y-4">
-          <div className="bg-white rounded-2xl p-4 sm:p-5 shadow-sm border border-[#DCE7F3] flex flex-wrap items-center justify-between gap-2.5">
-            <div className="min-w-0 flex-1">
-              <h3 className="font-black text-sm sm:text-base text-[#1A3A5F] flex items-center gap-2">
-                <FileText className="w-5 h-5 text-[#1F5AAA] shrink-0" />
-                <span>التعاميم والتوجيهات الإدارية الموجهة للمعلمين</span>
-              </h3>
-              <p className="text-xs text-slate-600 font-semibold mt-0.5">
-                اضغط على التعميم لتمييزه كمقروء وتقليل شارة التنبيهات
-              </p>
-            </div>
-
-            <span className="px-3 py-1.5 rounded-xl bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] text-xs font-bold shrink-0">
-              {teacherCirculars.length} تعاميم معتمدة
-            </span>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {teacherCirculars.length === 0 ? (
-              <div className="col-span-full bg-white rounded-2xl p-8 border border-[#DCE7F3] text-center text-slate-600 font-bold text-xs sm:text-sm">
-                لا توجد تعاميم مرسلة من مدير المدرسة حالياً
+          <div className="bg-white rounded-2xl p-4 sm:p-5 border border-[#DCE7F3] shadow-sm flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="p-2.5 bg-[#EEF5FC] text-[#1F5AAA] rounded-xl border border-[#C6DCF2]">
+                <Archive className="w-5 h-5" />
               </div>
-            ) : (
-              teacherCirculars.map((anc, ancIdx) => {
-                const displaySender =
-                  anc.senderName && !isGenericPrincipalSender(anc.senderName)
-                    ? anc.senderName
-                    : getSchoolPrincipalName(anc.schoolId || session.schoolId, session.schoolName);
-                return (
-                  <div
-                    key={anc.id ? `anc-${anc.id}-${ancIdx}` : `anc-idx-${ancIdx}`}
-                    onClick={() => {
-                      if (!anc.isRead) {
-                        setTeacherCirculars((prev) =>
-                          prev.map((c) => (c.id === anc.id ? { ...c, isRead: true } : c))
-                        );
-                      }
-                    }}
-                    className={`rounded-2xl p-5 border shadow-sm flex flex-col justify-between transition cursor-pointer ${
-                      anc.isRead
-                        ? 'bg-white border-[#DCE7F3]'
-                        : 'bg-[#F4F8FD] border-2 border-[#9BBEDF]'
-                    }`}
-                  >
-                    <div>
-                      <div className="flex items-center justify-between mb-2">
-                        <div className="flex items-center gap-2">
-                          {!anc.isRead && (
-                            <span className="w-2.5 h-2.5 rounded-full bg-[#1F5AAA] animate-pulse" title="تعميم جديد غير مقروء" />
-                          )}
-                          <span
-                            className={`text-[11px] font-bold px-2.5 py-0.5 rounded-md ${
-                              anc.priority === 'عاجل'
-                                ? 'bg-rose-50 text-rose-800 border border-rose-200'
-                                : 'bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2]'
-                            }`}
-                          >
-                            {anc.priority}
-                          </span>
-                        </div>
-                        <span className="text-[11px] text-slate-600 font-semibold">{anc.createdAt}</span>
-                      </div>
-
-                      <h4 className="font-black text-sm mb-1 text-[#1A3A5F]">
-                        {anc.title}
-                      </h4>
-                      <p className="text-xs text-slate-600 leading-relaxed mb-3 font-medium">{anc.content}</p>
-                    </div>
-
-                    <div className="pt-2 border-t border-slate-200 text-[11px] text-slate-600 flex items-center justify-between flex-wrap gap-1.5 font-semibold">
-                      <span>صادر عن: {displaySender}</span>
-                      {!anc.isRead && (
-                        <span className="text-[11px] text-[#1F5AAA] font-black">انقر للتمييز كمقروء ✓</span>
-                      )}
-                    </div>
-                  </div>
-                );
-              })
-            )}
+              <div>
+                <h3 className="font-black text-base text-[#1A3A5F]">أرشيف التعاميم الإدارية</h3>
+                <p className="text-xs text-slate-600 font-semibold mt-0.5">
+                  اختر مجلد الشهر لاستعراض التعاميم والتوجيهات المؤرشفة
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setIsCircularsArchiveFolderView(false);
+                setOpenedCircularsArchiveMonth(null);
+                setActiveSidebarView('dashboard');
+              }}
+              className="px-4 py-2 rounded-xl bg-[#1F5AAA] hover:bg-[#194B91] text-white text-xs font-black flex items-center gap-1.5 transition shadow-sm cursor-pointer border border-[#194B91]"
+            >
+              <ArrowRight className="w-4 h-4" />
+              <span>العودة للتعاميم المباشرة</span>
+            </button>
           </div>
+
+          <ComputerMonthFoldersGrid
+            currentMonth={activeMonth}
+            getCountForMonth={(m) =>
+              teacherCirculars.filter((anc) => {
+                const mVal = (anc as any).month;
+                const resolved =
+                  mVal && (ACADEMIC_MONTHS as readonly string[]).includes(mVal)
+                    ? mVal
+                    : getAcademicMonthFromTimestamp(getQuestionTimestamp(anc) || Date.now());
+                return resolved === m;
+              }).length
+            }
+            unitLabel="تعميم"
+            headerTitle="مجلدات أرشيف التعاميم الشهرية — اضغط لفتح المجلد:"
+            onSelectMonth={(monthName) => setOpenedCircularsArchiveMonth(monthName)}
+          />
         </div>
       )}
+
+      {activeTab === 'announcements' && (!isCircularsArchiveFolderView || openedCircularsArchiveMonth) && (() => {
+        const displayedCirculars =
+          isCircularsArchiveFolderView && openedCircularsArchiveMonth
+            ? teacherCirculars.filter((anc) => {
+                const mVal = (anc as any).month;
+                const resolved =
+                  mVal && (ACADEMIC_MONTHS as readonly string[]).includes(mVal)
+                    ? mVal
+                    : getAcademicMonthFromTimestamp(getQuestionTimestamp(anc) || Date.now());
+                return resolved === openedCircularsArchiveMonth;
+              })
+            : teacherCirculars;
+
+        return (
+          <div className="space-y-4">
+            <div className="bg-white rounded-2xl p-4 sm:p-5 shadow-sm border border-[#DCE7F3] flex flex-wrap items-center justify-between gap-2.5">
+              <div className="min-w-0 flex-1">
+                <h3 className="font-black text-sm sm:text-base text-[#1A3A5F] flex items-center gap-2">
+                  {isCircularsArchiveFolderView ? (
+                    <FolderOpen className="w-5 h-5 text-amber-600 shrink-0" />
+                  ) : (
+                    <FileText className="w-5 h-5 text-[#1F5AAA] shrink-0" />
+                  )}
+                  <span>
+                    {isCircularsArchiveFolderView
+                      ? `مجلد تعاميم شهر (${openedCircularsArchiveMonth})`
+                      : 'التعاميم والتوجيهات الإدارية الموجهة للمعلمين'}
+                  </span>
+                </h3>
+                <p className="text-xs text-slate-600 font-semibold mt-0.5">
+                  اضغط على التعميم لتمييزه كمقروء وتقليل شارة التنبيهات
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0">
+                {isCircularsArchiveFolderView && (
+                  <button
+                    type="button"
+                    onClick={() => setOpenedCircularsArchiveMonth(null)}
+                    className="px-3 py-1.5 rounded-xl bg-[#EEF5FC] hover:bg-[#DCEAF9] text-[#1F5AAA] border border-[#C6DCF2] text-xs font-black flex items-center gap-1 cursor-pointer"
+                  >
+                    <ArrowRight className="w-3.5 h-3.5" />
+                    <span>مجلدات التعاميم</span>
+                  </button>
+                )}
+                <span className="px-3 py-1.5 rounded-xl bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] text-xs font-bold tabular-nums">
+                  {displayedCirculars.length} تعاميم معتمدة
+                </span>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {displayedCirculars.length === 0 ? (
+                <div className="col-span-full bg-white rounded-2xl p-8 border border-[#DCE7F3] text-center text-slate-600 font-bold text-xs sm:text-sm">
+                  {isCircularsArchiveFolderView
+                    ? `لا توجد تعاميم مؤرشفة في مجلد شهر (${openedCircularsArchiveMonth})`
+                    : 'لا توجد تعاميم مرسلة من مدير المدرسة حالياً'}
+                </div>
+              ) : (
+                displayedCirculars.map((anc, ancIdx) => {
+                  const displaySender =
+                    anc.senderName && !isGenericPrincipalSender(anc.senderName)
+                      ? anc.senderName
+                      : getSchoolPrincipalName(anc.schoolId || session.schoolId, session.schoolName);
+                  return (
+                    <div
+                      key={anc.id ? `anc-${anc.id}-${ancIdx}` : `anc-idx-${ancIdx}`}
+                      onClick={() => {
+                        if (!anc.isRead) {
+                          setTeacherCirculars((prev) =>
+                            prev.map((c) => (c.id === anc.id ? { ...c, isRead: true } : c))
+                          );
+                        }
+                      }}
+                      className={`rounded-2xl p-5 border shadow-sm flex flex-col justify-between transition cursor-pointer ${
+                        anc.isRead
+                          ? 'bg-white border-[#DCE7F3]'
+                          : 'bg-[#F4F8FD] border-2 border-[#9BBEDF]'
+                      }`}
+                    >
+                      <div>
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="flex items-center gap-2">
+                            {!anc.isRead && (
+                              <span className="w-2.5 h-2.5 rounded-full bg-[#1F5AAA] animate-pulse" title="تعميم جديد غير مقروء" />
+                            )}
+                            <span
+                              className={`text-[11px] font-bold px-2.5 py-0.5 rounded-md ${
+                                anc.priority === 'عاجل'
+                                  ? 'bg-rose-50 text-rose-800 border border-rose-200'
+                                  : 'bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2]'
+                              }`}
+                            >
+                              {anc.priority}
+                            </span>
+                          </div>
+                          <span className="text-[11px] text-slate-600 font-semibold">{anc.createdAt}</span>
+                        </div>
+
+                        <h4 className="font-black text-sm mb-1 text-[#1A3A5F]">
+                          {anc.title}
+                        </h4>
+                        <p className="text-xs text-slate-600 leading-relaxed mb-3 font-medium">{anc.content}</p>
+                      </div>
+
+                      <div className="pt-2 border-t border-slate-200 text-[11px] text-slate-600 flex items-center justify-between flex-wrap gap-1.5 font-semibold">
+                        <span>صادر عن: {displaySender}</span>
+                        {!anc.isRead && (
+                          <span className="text-[11px] text-[#1F5AAA] font-black">انقر للتمييز كمقروء ✓</span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* TAB: FIXED TERM 1 WEEKLY SCHEDULE (Strictly classes taught by this teacher) */}
       {activeTab === 'schedule' && (
@@ -2952,7 +3261,11 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
           {/* Tab 2: كشف درجات طلابي */}
           <button
             type="button"
-            onClick={() => setActiveTab('gradebook')}
+            onClick={() => {
+              setActiveTab('gradebook');
+              setIsGradesArchiveFolderView(false);
+              setOpenedGradesArchiveMonth(null);
+            }}
             className={`min-h-[48px] py-1.5 px-1 rounded-2xl sm:rounded-full flex flex-col sm:flex-row items-center justify-center gap-0.5 sm:gap-1 transition-all cursor-pointer ${
               activeTab === 'gradebook' && !isRecommendationsModalOpen
                 ? 'bg-[#EEF5FC] text-[#1F5AAA] font-black shadow-2xs border border-[#C6DCF2]'
@@ -2968,6 +3281,8 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
             type="button"
             onClick={() => {
               setActiveTab('announcements');
+              setIsCircularsArchiveFolderView(false);
+              setOpenedCircularsArchiveMonth(null);
               setTeacherCirculars((prev) => prev.map((c) => ({ ...c, isRead: true })));
             }}
             className={`min-h-[48px] py-1.5 px-1 rounded-2xl sm:rounded-full flex flex-col sm:flex-row items-center justify-center gap-0.5 sm:gap-1 relative transition-all cursor-pointer ${
