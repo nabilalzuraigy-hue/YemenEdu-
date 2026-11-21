@@ -105,6 +105,58 @@ export function getUserInitials(fullName?: string): string {
 }
 
 /**
+ * Maps numeric/text grade to clean Arabic ordinal without repeating the word "الصف".
+ * Example: '8' -> 'الثامن', 'الصف الثامن' -> 'الثامن'
+ */
+export function getGradeOrdinalAr(grade?: string): string {
+  const raw = String(grade || '')
+    .replace(/^الصف\s*/u, '')
+    .replace(/^صف\s*/u, '')
+    .trim();
+  const map: Record<string, string> = {
+    '1': 'الأول',
+    '2': 'الثاني',
+    '3': 'الثالث',
+    '4': 'الرابع',
+    '5': 'الخامس',
+    '6': 'السادس',
+    '7': 'السابع',
+    '8': 'الثامن',
+    '9': 'التاسع',
+    '10': 'الأول الثانوي',
+    '11': 'الثاني الثانوي',
+    '12': 'الثالث الثانوي',
+  };
+  return map[raw] || raw || 'الثامن';
+}
+
+/**
+ * Strips duplicated prefixes ("أ. أ.") and embedded subject/grade strings from a user's display name.
+ */
+export function cleanPersonName(rawName?: string, subject?: string): string {
+  let cleaned = String(rawName || '').trim();
+  // Remove repeated leading honorifics like "أ. أ." or "أ/"
+  cleaned = cleaned.replace(/^(?:أ\s*[\.\/]\s*|أ\s+|الأستاذ\s+)+/u, '').trim();
+  // Remove trailing/embedded grade suffixes like "- صف 8" or "الصف الثامن"
+  cleaned = cleaned
+    .replace(
+      /(?:[-–—•|]\s*)?(?:ال)?صف\s*(?:الأول\s*الثانوي|الثاني\s*الثانوي|الثالث\s*الثانوي|السابع|الثامن|التاسع|العاشر|الحادي\s*عشر|الثاني\s*عشر|الأول|الثاني|الثالث|الرابع|الخامس|السادس|\d+)/giu,
+      ''
+    )
+    .trim();
+  // Remove embedded subject suffix if it duplicates the assigned subject
+  if (subject && subject.trim()) {
+    const escapedSubj = subject.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    cleaned = cleaned
+      .replace(new RegExp(`(?:[-–—•|]\\s*)?(?:مادة\\s+)?${escapedSubj}\\s*$`, 'iu'), '')
+      .trim();
+  }
+  // Clean leftover punctuation/separators at start or end
+  cleaned = cleaned.replace(/^[-–—•|\s]+|[-–—•|\s]+$/g, '').trim();
+  return cleaned || String(rawName || '').trim();
+}
+
+/**
  * Formats an epoch timestamp into live Arabic relative time ("الآن", "منذ دقيقة", "منذ ساعة", ...).
  */
 export function formatRelativeTimeAr(timestampMs: number, nowMs: number = Date.now()): string {

@@ -48,6 +48,7 @@ import {
   formatRelativeTimeAr,
   getSchoolPrincipalName,
   isGenericPrincipalSender,
+  cleanPersonName,
 } from '../utils/schoolDisplay';
 
 interface PrincipalStatsTabProps {
@@ -896,10 +897,10 @@ export const PrincipalStatsTab: React.FC<PrincipalStatsTabProps> = ({
               لوحة مدير المدرسة
             </h1>
           </div>
-          <p className="text-xs sm:text-sm font-extrabold text-[#1F5AAA]">
-            مرحباً {displayManagerName}، دعنا نلقي نظرة على أداء اليوم
+          <p className="text-sm sm:text-base font-black text-[#1A3A5F]">
+            أهلاً بك أ. {cleanPersonName(displayManagerName)}
           </p>
-          <p className="text-xs font-bold text-[#2C4C70]">
+          <p className="text-xs sm:text-sm font-bold text-[#1F5AAA]">
             {getSubtitle()}
           </p>
         </div>

@@ -661,10 +661,11 @@ ${transcript}
         }
       }
 
-      // Normalize requested distribution (must total 5; defaults to 3 MCQ + 1 True/False + 1 Fill-in-Blank)
+      // Normalize requested distribution (defaults implicitly to 3 questions: 2 MCQ + 1 True/False)
       const rawMcq = Number(distribution?.mcq);
       const rawTf = Number(distribution?.trueFalse);
       const rawFill = Number(distribution?.fillBlank);
+      const requestedSum = rawMcq + rawTf + rawFill;
       const isValidCustom =
         Number.isInteger(rawMcq) &&
         Number.isInteger(rawTf) &&
@@ -672,11 +673,12 @@ ${transcript}
         rawMcq >= 0 &&
         rawTf >= 0 &&
         rawFill >= 0 &&
-        rawMcq + rawTf + rawFill === 5;
+        (requestedSum === 3 || requestedSum === 5);
 
-      const mcqCount = isValidCustom ? rawMcq : 3;
+      const mcqCount = isValidCustom ? rawMcq : 2;
       const tfCount = isValidCustom ? rawTf : 1;
-      const fillCount = isValidCustom ? rawFill : 1;
+      const fillCount = isValidCustom ? rawFill : 0;
+      const totalQuestions = mcqCount + tfCount + fillCount;
 
       const expectedKinds: LessonQuestionKind[] = [
         ...Array<LessonQuestionKind>(mcqCount).fill('mcq'),
@@ -693,7 +695,7 @@ ${transcript}
 
       const avoidBlock =
         avoidList.length > 0
-          ? `\n6. تنبيه مهم للإعادة: تم رفض الأسئلة السابقة التالية، يُمنع تكرارها أو إعادة صياغتها، ويجب إنشاء 5 أسئلة جديدة ومختلفة تماماً عن أفكارها:\n${avoidList
+          ? `\n6. تنبيه مهم للإعادة: تم رفض الأسئلة السابقة التالية، يُمنع تكرارها أو إعادة صياغتها، ويجب إنشاء ${totalQuestions} أسئلة جديدة ومختلفة تماماً عن أفكارها:\n${avoidList
               .map((txt, i) => `   - (${i + 1}) ${txt}`)
               .join('\n')}`
           : '';
@@ -727,12 +729,12 @@ ${transcript}
 
 شروط صارمة:
 1. اعتمد في صياغة الأسئلة على محتوى الصفحات المرفوعة فقط، ولا تضف أي معلومات من خارج الدرس.
-2. قبل كتابة الأسئلة، حدّد الفكرة الرئيسية للدرس كاملاً ثم استخرج 5 أفكار فرعية رئيسية تغطي كامل الدرس عبر كل الصفحات المرفوعة (بداية الدرس، وسط الدرس، نهاية الدرس، الفهم والاستيعاب، وربط فكرتين من أجزاء مختلفة).
-3. أنشئ بالضبط 5 أسئلة بالتوزيع التالي حصراً:
-   - عدد (${mcqCount}) سؤال من نوع "mcq" (اختيار من متعدد): سؤال واضح + 4 خيارات مميزة + correctIndex من 0 إلى 3.
-   - عدد (${tfCount}) سؤال من نوع "true_false" (صح أو خطأ): عبارة خبرية دقيقة + خياران فقط ["صح", "خطأ"] + correctIndex (0 إذا كانت العبارة صحيحة، 1 إذا كانت العبارة خاطئة). نوّع بين الصح والخطأ ولا تجعل كل العبارات صحيحة.
-   - عدد (${fillCount}) سؤال من نوع "fill_blank" (أكمل العبارة): جملة ناقصة تحتوي على فراغ "......" في موضع كلمة أو مفهوم محوري + 4 خيارات للكلمة الناقصة + correctIndex من 0 إلى 3.
-4. رتّب الأسئلة الخمسة وفق هذه الأنواع بالضبط: [${expectedKinds.join(', ')}].
+2. قبل كتابة الأسئلة، حدّد الفكرة الرئيسية للدرس كاملاً ثم استخرج ${totalQuestions} أفكار فرعية رئيسية تغطي كامل الدرس عبر كل الصفحات المرفوعة (بداية الدرس، وسط الدرس، ونهايته).
+3. أنشئ بالضبط ${totalQuestions} أسئلة بالتوزيع التالي حصراً:
+   ${mcqCount > 0 ? `- عدد (${mcqCount}) سؤال من نوع "mcq" (اختيار من متعدد): سؤال واضح + 4 خيارات مميزة + correctIndex من 0 إلى 3.` : ''}
+   ${tfCount > 0 ? `- عدد (${tfCount}) سؤال من نوع "true_false" (صح أو خطأ): عبارة خبرية دقيقة + خياران فقط ["صح", "خطأ"] + correctIndex (0 إذا كانت العبارة صحيحة، 1 إذا كانت العبارة خاطئة). نوّع بين الصح والخطأ ولا تجعل كل العبارات صحيحة.` : ''}
+   ${fillCount > 0 ? `- عدد (${fillCount}) سؤال من نوع "fill_blank" (أكمل العبارة): جملة ناقصة تحتوي على فراغ "......" في موضع كلمة أو مفهوم محوري + 4 خيارات للكلمة الناقصة + correctIndex من 0 إلى 3.` : ''}
+4. رتّب الأسئلة وفق هذه الأنواع بالضبط: [${expectedKinds.join(', ')}].
 5. يُمنع منعاً باتاً كتابة أسئلة سطحية أو نسخ جمل الكتاب حرفياً. صُغ كل سؤال بلغة عربية فصحى سليمة ومناسبة لمستوى الطالب، واجعل مواقع الإجابات الصحيحة متنوعة.${avoidBlock}
 أعد النتيجة بصيغة JSON مطابقة للبنية المطلوبة فقط.`,
                 },
@@ -780,7 +782,7 @@ ${transcript}
       const parsed = JSON.parse(response.text || '{}');
       const rawQuestions = Array.isArray(parsed.questions) ? parsed.questions : [];
       const sanitizedQuestions = rawQuestions
-        .slice(0, 5)
+        .slice(0, totalQuestions)
         .map(
           (
             q: {
@@ -850,7 +852,7 @@ ${transcript}
         return;
       }
 
-      const shuffledQuestions = shuffleAndBalanceQuestions(sanitizedQuestions.slice(0, 5));
+      const shuffledQuestions = shuffleAndBalanceQuestions(sanitizedQuestions.slice(0, totalQuestions));
 
       res.json({
         questions: shuffledQuestions,

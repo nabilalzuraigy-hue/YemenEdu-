@@ -34,6 +34,7 @@ import {
   getSchoolPrincipalName,
   isGenericPrincipalSender,
   isSimulationAnnouncement,
+  cleanPersonName,
 } from '../utils/schoolDisplay';
 
 type PrincipalViewType =
@@ -548,10 +549,10 @@ export const PrincipalDashboard: React.FC<PrincipalDashboardProps> = ({ session 
                       لوحة مدير المدرسة
                     </h1>
                   </div>
-                  <p className="text-xs sm:text-sm font-extrabold text-[#1F5AAA]">
-                    مرحباً {session.name || 'مدير المدرسة'}، دعنا نلقي نظرة على أداء اليوم
+                  <p className="text-sm sm:text-base font-black text-[#1A3A5F]">
+                    أهلاً بك أ. {cleanPersonName(session.name || 'مدير المدرسة')}
                   </p>
-                  <p className="text-xs font-bold text-[#2C4C70]">
+                  <p className="text-xs sm:text-sm font-bold text-[#1F5AAA]">
                     {formatArabicSchoolName(session.schoolName, session.schoolId)} — التعاميم والملاحظات الإدارية
                   </p>
                 </div>

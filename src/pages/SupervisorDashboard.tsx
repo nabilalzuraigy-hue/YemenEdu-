@@ -58,7 +58,7 @@ import {
 import { UnifiedSidebar, UnifiedSidebarView } from '../components/UnifiedSidebar';
 import { ScheduleGridView } from '../components/ScheduleGridView';
 import { getApprovalBadgeAndFrame } from '../components/PrincipalInboxTab';
-import { formatArabicSchoolName } from '../utils/schoolDisplay';
+import { formatArabicSchoolName, cleanPersonName } from '../utils/schoolDisplay';
 import { compressImageFile, recompressDataUrl } from '../utils/imageCompression';
 import { playGentleNotificationSound } from '../services/soundUtils';
 
@@ -1002,26 +1002,28 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
         {/* Hero Card: Calm Pastel Sky-Blue matching Student/Teacher/Principal */}
         <div className="relative overflow-hidden rounded-[28px] bg-gradient-to-l from-[#B3CDE8] to-[#CBE0F4] border border-[#9BBEDF] shadow-[0_6px_20px_rgba(26,58,95,0.08)] p-5 sm:p-6 text-[#1A3A5F]">
           <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-4">
-            <div className="flex items-center gap-3">
-              <div className="w-11 h-11 rounded-2xl bg-white text-[#1F5AAA] border border-[#DCE7F3] flex items-center justify-center shadow-xs shrink-0">
-                <GraduationCap className="w-6 h-6" />
-              </div>
-              <div>
+            <div className="space-y-2">
+              <div className="flex items-center gap-2.5">
+                <div className="w-11 h-11 rounded-2xl bg-white text-[#1F5AAA] border border-[#DCE7F3] flex items-center justify-center shadow-xs shrink-0">
+                  <GraduationCap className="w-6 h-6" />
+                </div>
                 <h1 className="text-xl sm:text-2xl font-black text-[#1A3A5F] tracking-tight">
                   لوحة تحكم المشرف
                 </h1>
-                <p className="text-xs sm:text-sm font-bold text-[#28486B]">
-                  مرحباً {session.name || 'المشرف'} • {displaySchoolName}
+              </div>
+              <div className="space-y-0.5 pr-1">
+                <p className="text-sm sm:text-base font-black text-[#1A3A5F]">
+                  أهلاً بك أ. {cleanPersonName(session.name || 'المشرف')}
                 </p>
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs sm:text-sm font-bold text-[#28486B]">
+                  <span>الصفة: <strong className="text-[#1A3A5F] font-black">المشرف المدرسي — الترم الأول</strong></span>
+                  <span className="text-[#1F5AAA] font-extrabold">{displaySchoolName}</span>
+                </div>
               </div>
             </div>
 
             <div className="flex flex-wrap items-center gap-2 self-start md:self-auto">
-              <span className="px-3.5 py-2 rounded-2xl bg-white/95 border border-[#9BBEDF] text-xs font-black text-[#1F5AAA] shadow-2xs flex items-center gap-1.5">
-                <Sparkles className="w-4 h-4" />
-                <span>المشرف المدرسي — الترم الأول</span>
-              </span>
-              <div className="flex items-center gap-1.5 bg-white px-3.5 py-2 rounded-2xl border border-[#DCE7F3] text-xs font-black text-[#1A3A5F] shadow-2xs">
+              <div className="flex items-center gap-1.5 bg-white px-3.5 py-2 rounded-2xl border border-[#DCE7F3] text-xs font-black text-[#1A3A5F] shadow-2xs whitespace-nowrap shrink-0">
                 <Clock className="w-3.5 h-3.5 text-[#1F5AAA]" />
                 <span>صلاحية الحساب: {session.daysRemaining} يوم</span>
               </div>

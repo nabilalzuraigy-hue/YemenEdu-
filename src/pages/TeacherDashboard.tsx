@@ -30,7 +30,6 @@ import {
   Edit3,
   Image as ImageIcon,
   RotateCcw,
-  Minus,
   Folder,
   FolderOpen,
 } from 'lucide-react';
@@ -67,7 +66,14 @@ import { ScheduleGridView, doesSlotMatchTeacher } from '../components/ScheduleGr
 import { TeacherRecommendationModal } from '../components/TeacherRecommendationModal';
 import { ComputerMonthFoldersGrid } from '../components/ComputerMonthFoldersGrid';
 import { getAcademicMonthFromTimestamp } from '../components/StudentSubjectGradeTables';
-import { formatArabicSchoolName, getSchoolPrincipalName, isGenericPrincipalSender, isSimulationAnnouncement } from '../utils/schoolDisplay';
+import {
+  formatArabicSchoolName,
+  getSchoolPrincipalName,
+  isGenericPrincipalSender,
+  isSimulationAnnouncement,
+  cleanPersonName,
+  getGradeOrdinalAr,
+} from '../utils/schoolDisplay';
 
 interface TeacherDashboardProps {
   session: UserSession;
@@ -630,6 +636,9 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
   const [options, setOptions] = useState<string[]>(['', '', '', '']);
   const [correctOptionIndex, setCorrectOptionIndex] = useState<number>(0);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const [isPublishingManual, setIsPublishingManual] = useState<boolean>(false);
+  const [manualPublishSuccess, setManualPublishSuccess] = useState<boolean>(false);
+  const [manualButtonPulse, setManualButtonPulse] = useState<boolean>(false);
 
   // Quick Lesson Questions Upload & Daily Quota (5 questions/day limit, zero technical jargon)
   interface DraftLessonQuestion {
@@ -670,11 +679,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
     }
   });
   const [dailyQuotaLoading, setDailyQuotaLoading] = useState<boolean>(true);
-  const [questionDistribution, setQuestionDistribution] = useState<{
-    mcq: number;
-    trueFalse: number;
-    fillBlank: number;
-  }>({ mcq: 3, trueFalse: 1, fillBlank: 1 });
+  const defaultQuestionDistribution = { mcq: 2, trueFalse: 1, fillBlank: 0 };
   const [queuedLessonPages, setQueuedLessonPages] = useState<PreparedLessonPage[]>([]);
   const [sessionLessonPages, setSessionLessonPages] = useState<PreparedLessonPage[]>([]);
   const [isConvertingPages, setIsConvertingPages] = useState<boolean>(false);
@@ -851,32 +856,6 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
     setArchiveAlertOpen(false);
   };
 
-  const adjustQuestionDistribution = (
-    target: 'mcq' | 'trueFalse' | 'fillBlank',
-    delta: 1 | -1
-  ) => {
-    setQuestionDistribution((prev) => {
-      const next = { ...prev };
-      if (delta === 1) {
-        if (next[target] >= 5) return prev;
-        const others = (['mcq', 'trueFalse', 'fillBlank'] as const).filter((k) => k !== target);
-        const donor = others.sort((a, b) => next[b] - next[a]).find((k) => next[k] > 0);
-        if (!donor) return prev;
-        next[target] += 1;
-        next[donor] -= 1;
-      } else {
-        if (next[target] <= 0) return prev;
-        const receiver =
-          target === 'mcq'
-            ? 'trueFalse'
-            : 'mcq';
-        next[target] -= 1;
-        next[receiver] += 1;
-      }
-      return next;
-    });
-  };
-
   // Automatic midnight rollover check
   useEffect(() => {
     const interval = setInterval(() => {
@@ -929,7 +908,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
   }, [preparedQuestions, draftStorageKey]);
 
   const QUOTA_EXHAUSTED_MESSAGE =
-    'تم تجهيز أسئلة اليوم، عدد الأسئلة لليوم الواحد لا يتجاوز 5 أسئلة، يمكنك تجهيز أسئلة جديدة غداً';
+    'تم تجهيز أسئلة اليوم، عدد الأسئلة لليوم الواحد لا يتجاوز 3 أسئلة، يمكنك تجهيز أسئلة جديدة غداً';
 
   const raceWithTimeout = <T,>(promise: Promise<T>, ms = 2500): Promise<T> => {
     return new Promise<T>((resolve, reject) => {
@@ -1017,7 +996,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
             })),
             grade: teacherGrade,
             subject: teacherSubject,
-            distribution: questionDistribution,
+            distribution: defaultQuestionDistribution,
             previousQuestions: options?.previousQuestionTexts || [],
           }),
         });
@@ -1030,7 +1009,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
         throw new Error(data?.error || 'تعذر تجهيز الأسئلة حالياً، يرجى المحاولة مرة أخرى.');
       }
 
-      const incoming = Array.isArray(data?.questions) ? data.questions.slice(0, 5) : [];
+      const incoming = Array.isArray(data?.questions) ? data.questions.slice(0, 3) : [];
       if (incoming.length === 0) {
         throw new Error('تعذر تجهيز الأسئلة بوضوح، يرجى المحاولة بصور أوضح.');
       }
@@ -1332,6 +1311,8 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
   // 1. Submit New Manual MCQ Question (Only Multiple Choice, Fixed 5 points, Max 5 questions)
   const handleCreateQuestion = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isPublishingManual) return;
+
     if (todayManualQuestionsCount >= 5) {
       setToastMsg('وصلت للحد الأقصى: عدد الأسئلة اليدوية لا يزيد عن 5 أسئلة.');
       setTimeout(() => setToastMsg(null), 3500);
@@ -1362,6 +1343,10 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
       return;
     }
 
+    setManualButtonPulse(true);
+    setIsPublishingManual(true);
+    setManualPublishSuccess(false);
+
     const now = new Date();
     const nowFormatted = formatArabicDateTime(now);
     const nowTimestamp = now.getTime();
@@ -1389,26 +1374,33 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
     };
 
     try {
-      const docRef = await addDoc(collection(db, 'questions'), cleanFirestorePayload({
-        ...newQuestionData,
-        createdAt: serverTimestamp(),
-      }));
-      await appDataService.addQuestion({
-        ...newQuestionData,
-        id: docRef.id,
-        createdAt: now.toISOString(),
-      } as any);
-    } catch {
-      await appDataService.addQuestion({
-        ...newQuestionData,
-        createdAt: now.toISOString(),
-      });
-    }
+      try {
+        const docRef = await addDoc(collection(db, 'questions'), cleanFirestorePayload({
+          ...newQuestionData,
+          createdAt: serverTimestamp(),
+        }));
+        await appDataService.addQuestion({
+          ...newQuestionData,
+          id: docRef.id,
+          createdAt: now.toISOString(),
+        } as any);
+      } catch {
+        await appDataService.addQuestion({
+          ...newQuestionData,
+          createdAt: now.toISOString(),
+        });
+      }
 
-    setQText('');
-    setOptions(['', '', '', '']);
-    setToastMsg('✅ تم حفظ السؤال الموضوعي بنجاح وإضافته إلى بنك الأسئلة!');
-    setTimeout(() => setToastMsg(null), 3000);
+      setQText('');
+      setOptions(['', '', '', '']);
+      setManualPublishSuccess(true);
+      setToastMsg('✅ تم النشر بنجاح وإضافة السؤال إلى بنك الأسئلة!');
+      setTimeout(() => setToastMsg(null), 3000);
+      setTimeout(() => setManualPublishSuccess(false), 2600);
+    } finally {
+      setIsPublishingManual(false);
+      setTimeout(() => setManualButtonPulse(false), 750);
+    }
   };
 
   // Monthly Archive and Rollover Handler
@@ -1570,7 +1562,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
       {/* Soft Pastel Sky-Blue Hero Card matching reference screenshot */}
       <div className="relative overflow-hidden rounded-[28px] bg-gradient-to-l from-[#B3CDE8] to-[#CBE0F4] border border-[#9BBEDF] shadow-[0_6px_20px_rgba(26,58,95,0.08)] p-5 sm:p-6 text-[#1A3A5F]">
         <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-4">
-          <div className="space-y-1">
+          <div className="space-y-2">
             <div className="flex items-center gap-2.5">
               <span className="p-2.5 rounded-2xl bg-white text-[#1F5AAA] border border-[#DCE7F3] shadow-xs shrink-0">
                 <FileText className="w-6 h-6" />
@@ -1579,9 +1571,16 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
                 لوحة تحكم المعلم
               </h1>
             </div>
-            <p className="text-xs sm:text-sm font-bold text-[#28486B] pr-1">
-              أهلاً بك أ. {session.name} - الصف {session.grade} - مادة {session.subject || 'العلوم'} • {formatArabicSchoolName(session.schoolName, session.schoolId)}
-            </p>
+            <div className="space-y-0.5 pr-1">
+              <p className="text-sm sm:text-base font-black text-[#1A3A5F]">
+                أهلاً بك أ. {cleanPersonName(session.name, teacherSubject)}
+              </p>
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs sm:text-sm font-bold text-[#28486B]">
+                <span>المادة: <strong className="text-[#1A3A5F] font-black">{teacherSubject}</strong></span>
+                <span>الصف: <strong className="text-[#1A3A5F] font-black">{getGradeOrdinalAr(teacherGrade)}</strong></span>
+                <span className="text-[#1F5AAA] font-extrabold">{formatArabicSchoolName(session.schoolName, session.schoolId)}</span>
+              </div>
+            </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5 sm:gap-3">
@@ -1589,7 +1588,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
             <button
               type="button"
               onClick={() => setActiveTab((prev) => (prev === 'schedule' ? 'create_question' : 'schedule'))}
-              className={`px-3.5 py-2.5 rounded-2xl border shadow-sm transition cursor-pointer flex items-center gap-2 text-xs font-black ${
+              className={`px-3.5 py-2.5 rounded-2xl border shadow-sm transition cursor-pointer flex items-center gap-2 text-xs font-black whitespace-nowrap shrink-0 ${
                 activeTab === 'schedule'
                   ? 'bg-[#1A3A5F] text-white border-[#1A3A5F]'
                   : 'bg-white hover:bg-[#EEF5FC] text-[#1F5AAA] border-[#DCE7F3]'
@@ -1597,7 +1596,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
               title="جدول الحصص الأسبوعي (الترم الأول)"
             >
               <Calendar className="w-4 h-4 shrink-0" />
-              <span>جدول حصصي</span>
+              <span>جدول الحصص</span>
               {teacherTaughtSchedules.length > 0 && (
                 <span className="px-1.5 py-0.5 rounded-full bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] text-[10px] font-black">
                   {teacherTaughtSchedules.length}
@@ -2052,7 +2051,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
                     تجهيز أسئلة الدرس مباشرة
                   </h3>
                   <p className="text-xs text-slate-600 font-semibold mt-0.5">
-                    صوّر صفحات الدرس أو ارفع ملف (صورة، PDF، Word) بحد أقصى 5 صفحات لتجهيز 5 أسئلة جاهزة
+                    صوّر صفحات الدرس أو ارفع ملف (صورة، PDF، Word) بحد أقصى 5 صفحات لتجهيز 3 أسئلة جاهزة
                   </p>
                 </div>
 
@@ -2088,59 +2087,6 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
                   </button>
                 </div>
               </div>
-
-              {/* Customizable 5-Question Types Distribution (Default: 3 MCQ + 1 T/F + 1 Fill-in-Blank, Total = 5) */}
-              {(!dailyQuotaUsed || preparedQuestions.length > 0) && !isConvertingPages && !isPreparingQuestions && (
-                <div className="bg-[#F8FBFF] rounded-xl p-3.5 border border-[#DCE7F3] space-y-2.5">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="text-xs font-black text-[#1A3A5F]">
-                      توزيع أنواع الأسئلة الخمسة (المجموع 5 أسئلة):
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setQuestionDistribution({ mcq: 3, trueFalse: 1, fillBlank: 1 })}
-                      className="text-[11px] font-bold text-[#1F5AAA] hover:underline cursor-pointer"
-                    >
-                      الافتراضي (3 اختيار + 1 صح/خطأ + 1 أكمل)
-                    </button>
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-                    {[
-                      { key: 'mcq' as const, label: 'اختيار من متعدد (4 خيارات)' },
-                      { key: 'trueFalse' as const, label: 'صح أو خطأ (خياران)' },
-                      { key: 'fillBlank' as const, label: 'أكمل العبارة (4 خيارات)' },
-                    ].map((item) => (
-                      <div
-                        key={item.key}
-                        className="bg-white rounded-xl px-3 py-2 border border-[#DCE7F3] flex items-center justify-between gap-2"
-                      >
-                        <span className="text-[11px] font-bold text-[#1A3A5F]">{item.label}</span>
-                        <div className="flex items-center gap-1.5">
-                          <button
-                            type="button"
-                            onClick={() => adjustQuestionDistribution(item.key, -1)}
-                            disabled={questionDistribution[item.key] <= 0}
-                            className="w-6 h-6 rounded-lg bg-[#EEF5FC] hover:bg-[#dcebfa] disabled:opacity-40 text-[#1F5AAA] flex items-center justify-center cursor-pointer border border-[#C6DCF2]"
-                          >
-                            <Minus className="w-3 h-3" />
-                          </button>
-                          <span className="w-5 text-center text-xs font-black text-[#1A3A5F]">
-                            {questionDistribution[item.key]}
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() => adjustQuestionDistribution(item.key, 1)}
-                            disabled={questionDistribution[item.key] >= 5}
-                            className="w-6 h-6 rounded-lg bg-[#EEF5FC] hover:bg-[#dcebfa] disabled:opacity-40 text-[#1F5AAA] flex items-center justify-center cursor-pointer border border-[#C6DCF2]"
-                          >
-                            <Plus className="w-3 h-3" />
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
 
               {/* Error / Limit Notice */}
               {lessonFlowError && (
@@ -2277,7 +2223,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
                         onClick={handleRegenerateQuestions}
                         disabled={isPreparingQuestions || isConvertingPages}
                         className="px-3.5 py-1.5 rounded-xl bg-white hover:bg-amber-50 text-[#1A3A5F] border border-[#9BBEDF] text-xs font-black flex items-center gap-1.5 cursor-pointer transition shadow-2xs"
-                        title="تجهيز 5 أسئلة جديدة بنفس حصة اليوم"
+                        title="تجهيز 3 أسئلة جديدة بنفس حصة اليوم"
                       >
                         <RotateCcw className="w-3.5 h-3.5 text-[#1F5AAA]" />
                         <span>إعادة</span>
@@ -2508,10 +2454,29 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
                     </span>
                     <button
                       type="submit"
-                      className="py-2.5 px-6 bg-[#1F5AAA] hover:bg-[#194B91] text-white text-xs font-black rounded-xl transition shadow-sm flex items-center gap-2 cursor-pointer border border-[#194B91]"
+                      disabled={isPublishingManual}
+                      className={`py-2.5 px-6 text-white text-xs font-black rounded-xl transition-all duration-200 shadow-sm flex items-center gap-2 cursor-pointer border whitespace-nowrap shrink-0 ${
+                        manualPublishSuccess
+                          ? 'bg-emerald-600 hover:bg-emerald-700 border-emerald-700 animate-pulse scale-[1.03]'
+                          : isPublishingManual || manualButtonPulse
+                          ? 'bg-[#194B91] border-[#194B91] animate-pulse scale-[1.03]'
+                          : 'bg-[#1F5AAA] hover:bg-[#194B91] border-[#194B91]'
+                      }`}
                     >
-                      <Send className="w-4 h-4" />
-                      <span>حفظ السؤال لشهر ({activeMonth})</span>
+                      {isPublishingManual ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : manualPublishSuccess ? (
+                        <CheckCircle2 className="w-4 h-4" />
+                      ) : (
+                        <Send className="w-4 h-4" />
+                      )}
+                      <span>
+                        {manualPublishSuccess
+                          ? 'تم النشر بنجاح'
+                          : isPublishingManual
+                          ? 'جاري النشر...'
+                          : 'نشر السؤال'}
+                      </span>
                     </button>
                   </div>
                 </form>
