@@ -385,6 +385,46 @@ export function getHomeworkArchiveCutoffInfo(ts: number): {
   };
 }
 
+export function formatDayKeyFromTimestamp(ts: number): string {
+  const d = new Date(ts || Date.now());
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+export function formatArabicDayLabel(dayKey: string, nowMs: number = Date.now()): string {
+  const parts = dayKey.split('-').map(Number);
+  if (parts.length !== 3 || parts.some(isNaN)) return dayKey;
+  const targetDate = new Date(parts[0], parts[1] - 1, parts[2]);
+  const now = new Date(nowMs);
+  const todayKey = formatDayKeyFromTimestamp(now.getTime());
+  const yesterdayDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+  const yesterdayKey = formatDayKeyFromTimestamp(yesterdayDate.getTime());
+
+  let formattedDate = dayKey;
+  try {
+    formattedDate = new Intl.DateTimeFormat('ar-YE', {
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+    }).format(targetDate);
+  } catch {
+    formattedDate = dayKey;
+  }
+
+  if (dayKey === todayKey) return `اليوم — ${formattedDate}`;
+  if (dayKey === yesterdayKey) return `أمس — ${formattedDate}`;
+  return formattedDate;
+}
+
+export function isQuestionFromPreviousDayForStudent(q: any, nowMs: number = Date.now()): boolean {
+  const ts = getQuestionTimestamp(q);
+  if (!ts || ts <= 0) return false;
+  return formatDayKeyFromTimestamp(ts) < formatDayKeyFromTimestamp(nowMs);
+}
+
 export function isQuestionArchivedForStudentWeek(q: any, nowMs: number = Date.now()): boolean {
   const ts = getQuestionTimestamp(q);
   if (!ts || ts <= 0) return false;
@@ -1714,7 +1754,8 @@ class AppDataService {
       const ts = getQuestionTimestamp(qItem);
       if (!ts || ts <= 0) continue;
       const info = getHomeworkArchiveCutoffInfo(ts);
-      if (nowMs < info.archiveAtMs) {
+      const isPrevDay = formatDayKeyFromTimestamp(ts) < formatDayKeyFromTimestamp(nowMs);
+      if (nowMs < info.archiveAtMs && !isPrevDay) {
         continue;
       }
 

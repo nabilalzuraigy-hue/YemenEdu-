@@ -33,6 +33,9 @@ import {
   Square,
   Volume2,
   ShieldCheck,
+  Folder,
+  FolderOpen,
+  ArrowRight,
 } from 'lucide-react';
 import { collection, query, where, onSnapshot } from 'firebase/firestore';
 import { db } from '../firebase/config';
@@ -54,9 +57,15 @@ import {
   SUPERVISOR_PRIMARY_CATEGORIES,
   SUPERVISOR_SUBTYPES_MAP,
   getGradeLabelAr,
+  getCurrentAcademicMonth,
+  formatDayKeyFromTimestamp,
+  formatArabicDayLabel,
+  getSchoolActivityTimestamp,
 } from '../services/appData';
 import { UnifiedSidebar, UnifiedSidebarView } from '../components/UnifiedSidebar';
 import { ScheduleGridView } from '../components/ScheduleGridView';
+import { ComputerMonthFoldersGrid } from '../components/ComputerMonthFoldersGrid';
+import { getAcademicMonthFromTimestamp } from '../components/StudentSubjectGradeTables';
 import { getApprovalBadgeAndFrame } from '../components/PrincipalInboxTab';
 import { formatArabicSchoolName, cleanPersonName } from '../utils/schoolDisplay';
 import { compressImageFile, recompressDataUrl } from '../utils/imageCompression';
@@ -117,6 +126,14 @@ const normalizeCategoryBucket = (cat: SupervisorActivityCategory): 'تقرير' 
   return 'نشاط';
 };
 
+const resolveSupervisorActivityTimestamp = (act: SupervisorActivity): number => {
+  if (typeof act?.activityDate === 'string' && act.activityDate.trim()) {
+    const parsed = Date.parse(`${act.activityDate.trim()}T09:00:00`);
+    if (!Number.isNaN(parsed)) return parsed;
+  }
+  return getSchoolActivityTimestamp(act) || Date.now();
+};
+
 const getActivityBranchIcon = (cat: SupervisorActivityCategory, subType?: string) => {
   const bucket = normalizeCategoryBucket(cat);
   if (bucket === 'تقرير') return FileText;
@@ -162,6 +179,11 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
   const displaySchoolName = formatArabicSchoolName(session.schoolName, schoolId);
 
   const [activeTab, setActiveTab] = useState<'activities' | 'attendance' | 'schedule'>('activities');
+  const [supervisorArchiveView, setSupervisorArchiveView] = useState<
+    'supervisor_archive_reports' | 'supervisor_archive_events' | 'supervisor_archive_activities' | null
+  >(null);
+  const [openedArchiveMonth, setOpenedArchiveMonth] = useState<string | null>(null);
+  const [expandedArchiveDayKeys, setExpandedArchiveDayKeys] = useState<Record<string, boolean>>({});
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [toast, setToast] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
@@ -215,7 +237,6 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
   const [isDraftingReport, setIsDraftingReport] = useState(false);
   const [aiDraftError, setAiDraftError] = useState<string | null>(null);
   const [hasAiDraftReady, setHasAiDraftReady] = useState(false);
-  const [hasReviewedDraft, setHasReviewedDraft] = useState(false);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -230,7 +251,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
   const actCameraRef = useRef<HTMLInputElement | null>(null);
   const actGalleryRef = useRef<HTMLInputElement | null>(null);
 
-  // --- TAB 2: ATTENDANCE STATE (Gemini Vision Prominent Cards + Send to Principal Approval) ---
+  // --- TAB 2: ATTENDANCE STATE ---
   const [attGrade, setAttGrade] = useState('7');
   const [attClassNumber, setAttClassNumber] = useState('1');
   const [attDate, setAttDate] = useState<string>(() => getTodayIsoDate());
@@ -244,7 +265,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
   const attCameraRef = useRef<HTMLInputElement | null>(null);
   const attGalleryRef = useRef<HTMLInputElement | null>(null);
 
-  // --- TAB 3: WEEKLY SCHEDULE STATE (Fixed Term 1, Photo Gemini OR Manual -> Principal Approval) ---
+  // --- TAB 3: WEEKLY SCHEDULE STATE ---
   const [isScheduleComposerOpen, setIsScheduleComposerOpen] = useState(false);
   const [schedGrade, setSchedGrade] = useState('7');
   const [schedClassNumber, setSchedClassNumber] = useState('1');
@@ -346,6 +367,19 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
   };
 
   const handleSelectSidebarView = (view: UnifiedSidebarView) => {
+    if (
+      view === 'supervisor_archive_reports' ||
+      view === 'supervisor_archive_events' ||
+      view === 'supervisor_archive_activities'
+    ) {
+      setSupervisorArchiveView(view);
+      setOpenedArchiveMonth(null);
+      setExpandedArchiveDayKeys({});
+      return;
+    }
+    setSupervisorArchiveView(null);
+    setOpenedArchiveMonth(null);
+    setExpandedArchiveDayKeys({});
     if (view === 'supervisor_activities' || view === 'dashboard') {
       setActiveTab('activities');
     } else if (view === 'supervisor_attendance') {
@@ -404,7 +438,6 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
   const processRecordedVoiceBlob = async (audioBlob: Blob) => {
     setAiDraftError(null);
     setIsDraftingReport(true);
-    setHasReviewedDraft(false);
 
     if (recordedAudioPreviewUrl) {
       URL.revokeObjectURL(recordedAudioPreviewUrl);
@@ -434,7 +467,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
 
       const contentType = response.headers.get('content-type') || '';
       if (!contentType.includes('application/json')) {
-        throw new Error('خدمة تحويل الصوت عبر Gemini غير متاحة في هذه البيئة.');
+        throw new Error('خدمة تحويل الصوت غير متاحة في هذه البيئة.');
       }
 
       const payload = await response.json();
@@ -456,7 +489,6 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
       setActTitle(suggestedTitle || `${actCategory} - ${actSubType}`);
       setActDetails(formalReport);
       setHasAiDraftReady(true);
-      setHasReviewedDraft(false);
       showToast('success', '✨ تم تحويل تسجيلك الصوتي وصياغة التقرير الرسمي. راجع النص وعدّل ما يلزم قبل الإرسال.');
     } catch (err: any) {
       setAiDraftError(err?.message || 'حدث خطأ أثناء معالجة التسجيل الصوتي.');
@@ -575,7 +607,6 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
 
     setAiDraftError(null);
     setIsDraftingReport(true);
-    setHasReviewedDraft(false);
 
     try {
       const response = await fetch(resolveGeminiApiUrl('/api/gemini/draft-report-from-image'), {
@@ -608,7 +639,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
       const suggestedTitle = String(payload?.suggestedTitle || '').trim();
       const formalReport = String(payload?.formalReport || '').trim();
       if (!formalReport) {
-        throw new Error('لم يتمكن Gemini من صياغة الوصف، يرجى تجربة صورة أوضح.');
+        throw new Error('تعذر صياغة الوصف، يرجى تجربة صورة أوضح.');
       }
 
       setActInputType('صورة');
@@ -617,8 +648,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
       setActTitle(suggestedTitle || cleanLine);
       setActDetails(formalReport);
       setHasAiDraftReady(true);
-      setHasReviewedDraft(false);
-      showToast('success', '✨ صاغ Gemini التقرير الكامل بناءً على الصورة والسطر. راجع النص وعدّله ثم أرسله للمدير.');
+      showToast('success', '✨ تم إعداد التقرير الكامل بناءً على الصورة والسطر. راجع النص وعدّله ثم أرسله للمدير.');
     } catch (err: any) {
       setAiDraftError(err?.message || 'حدث خطأ أثناء صياغة التقرير من الصورة.');
       showToast('error', err?.message || 'حدث خطأ أثناء صياغة التقرير من الصورة.');
@@ -636,7 +666,6 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
     setOneLineNote('');
     setActAudioUrl('');
     setHasAiDraftReady(false);
-    setHasReviewedDraft(false);
     setAiDraftError(null);
     if (recordedAudioPreviewUrl) {
       URL.revokeObjectURL(recordedAudioPreviewUrl);
@@ -666,7 +695,6 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
     setActTargetClass(act.targetClass || 'الكل');
     setActDate(act.activityDate || getTodayIsoDate());
     setHasAiDraftReady(true);
-    setHasReviewedDraft(false);
     setAiDraftError(null);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
@@ -680,15 +708,11 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
     if (isSavingActivity) return;
 
     if (!hasAiDraftReady) {
-      showToast('error', 'استخدم التسجيل الصوتي أو الصورة + سطر أولاً لتوليد المسودة ومراجعتها قبل الإرسال.');
+      showToast('error', 'استخدم التسجيل الصوتي أو الصورة + سطر أولاً لتجهيز النص قبل الإرسال.');
       return;
     }
     if (!actTitle.trim() || !actDetails.trim()) {
       showToast('error', 'يرجى مراجعة عنوان التقرير والنص الرسمي قبل الإرسال.');
-      return;
-    }
-    if (!hasReviewedDraft) {
-      showToast('error', 'لا يمكن إرسال أي تقرير للمدير بدون مراجعة المشرف وتأكيد المراجعة أولاً.');
       return;
     }
 
@@ -1117,6 +1141,9 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                       type="button"
                       onClick={() => {
                         appDataService.markNotificationRead(n.id);
+                        setSupervisorArchiveView(null);
+                        setOpenedArchiveMonth(null);
+                        setExpandedArchiveDayKeys({});
                         setActiveTab(n.relatedKind === 'attendance' ? 'attendance' : 'activities');
                       }}
                       className={`w-full text-right p-2.5 rounded-xl border text-xs flex items-center justify-between gap-2 cursor-pointer transition ${
@@ -1160,9 +1187,316 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
         )}
 
         {/* =================================================================== */}
+        {/* MONTHLY ARCHIVE VIEW (التقارير / الفعاليات / الأنشطة) */}
+        {/* =================================================================== */}
+        {supervisorArchiveView && (() => {
+          const archiveMetaMap = {
+            supervisor_archive_reports: {
+              title: 'ارشيف التقارير الشهري',
+              subtitle: 'التقارير المدرسية المؤرشفة حسب الشهر واليوم',
+              bucket: 'تقرير' as const,
+              unitLabel: 'تقرير',
+              Icon: FileText,
+            },
+            supervisor_archive_events: {
+              title: 'ارشيف الفعاليات الشهري',
+              subtitle: 'الفعاليات المدرسية المؤرشفة حسب الشهر واليوم',
+              bucket: 'فعالية' as const,
+              unitLabel: 'فعالية',
+              Icon: Flag,
+            },
+            supervisor_archive_activities: {
+              title: 'ارشيف الأنشطة الشهري',
+              subtitle: 'الأنشطة المدرسية المؤرشفة حسب الشهر واليوم',
+              bucket: 'نشاط' as const,
+              unitLabel: 'نشاط',
+              Icon: Trophy,
+            },
+          };
+          const meta = archiveMetaMap[supervisorArchiveView];
+          const ArchiveIcon = meta.Icon;
+          const currentAcademicMonth = getCurrentAcademicMonth();
+          const categoryItems = activities.filter(
+            (a) => normalizeCategoryBucket(a.category) === meta.bucket
+          );
+          const monthItems = openedArchiveMonth
+            ? categoryItems.filter(
+                (a) => getAcademicMonthFromTimestamp(resolveSupervisorActivityTimestamp(a)) === openedArchiveMonth
+              )
+            : [];
+
+          const dayGroupMap = new Map<string, SupervisorActivity[]>();
+          for (const item of monthItems) {
+            const dKey = formatDayKeyFromTimestamp(resolveSupervisorActivityTimestamp(item));
+            const arr = dayGroupMap.get(dKey) || [];
+            arr.push(item);
+            dayGroupMap.set(dKey, arr);
+          }
+          const dayGroups = Array.from(dayGroupMap.entries()).sort((a, b) => b[0].localeCompare(a[0]));
+          const staggerDelays = [
+            'delay-[0ms]',
+            'delay-[45ms]',
+            'delay-[90ms]',
+            'delay-[135ms]',
+            'delay-[180ms]',
+            'delay-[225ms]',
+          ];
+
+          return (
+            <div className="space-y-4 animate-in fade-in">
+              <div className="bg-white rounded-2xl p-4 sm:p-5 border border-[#DCE7F3] shadow-sm flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-11 h-11 rounded-2xl bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] flex items-center justify-center shrink-0">
+                    <ArchiveIcon className="w-5 h-5" />
+                  </div>
+                  <div className="min-w-0">
+                    <h2 className="text-base sm:text-lg font-black text-[#1A3A5F] truncate">
+                      {meta.title}
+                    </h2>
+                    <p className="text-xs text-[#5C7085] font-semibold truncate">
+                      {meta.subtitle}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  {openedArchiveMonth && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setOpenedArchiveMonth(null);
+                        setExpandedArchiveDayKeys({});
+                      }}
+                      className="px-3.5 py-2 rounded-xl bg-[#EEF5FC] hover:bg-[#DCEAF9] text-[#1F5AAA] border border-[#C6DCF2] text-xs font-black flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap shrink-0"
+                    >
+                      <ArrowRight className="w-4 h-4" />
+                      <span>العودة لمجلدات الشهور</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSupervisorArchiveView(null);
+                      setOpenedArchiveMonth(null);
+                      setExpandedArchiveDayKeys({});
+                      setActiveTab('activities');
+                    }}
+                    className="px-4 py-2 rounded-xl bg-[#1F5AAA] hover:bg-[#194B91] text-white text-xs font-black flex items-center gap-1.5 transition shadow-sm cursor-pointer border border-[#194B91] whitespace-nowrap shrink-0"
+                  >
+                    <ArrowRight className="w-4 h-4" />
+                    <span>العودة إلى لوحة المشرف</span>
+                  </button>
+                </div>
+              </div>
+
+              {!openedArchiveMonth ? (
+                <ComputerMonthFoldersGrid
+                  currentMonth={currentAcademicMonth}
+                  getCountForMonth={(m) =>
+                    categoryItems.filter(
+                      (a) => getAcademicMonthFromTimestamp(resolveSupervisorActivityTimestamp(a)) === m
+                    ).length
+                  }
+                  unitLabel={meta.unitLabel}
+                  headerTitle={`مجلدات ${meta.title} — اضغط لفتح المجلد:`}
+                  onSelectMonth={(monthName) => {
+                    setOpenedArchiveMonth(monthName);
+                    setExpandedArchiveDayKeys({});
+                  }}
+                />
+              ) : (
+                <div className="space-y-4">
+                  <div className="bg-[#F4F8FC] border border-[#DCE7F3] rounded-2xl px-4 py-3 flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <FolderOpen className="w-5 h-5 text-amber-600 shrink-0" />
+                      <span className="text-xs sm:text-sm font-black text-[#1A3A5F]">
+                        مجلد شهر ({openedArchiveMonth})
+                      </span>
+                    </div>
+                    <span className="text-xs font-bold text-[#1F5AAA] tabular-nums">
+                      {monthItems.length} {meta.unitLabel} في هذا الشهر
+                    </span>
+                  </div>
+
+                  {dayGroups.length === 0 ? (
+                    <div className="bg-white rounded-2xl p-8 border border-[#DCE7F3] text-center shadow-sm">
+                      <Folder className="w-12 h-12 text-[#9BBEDF] mx-auto mb-3" />
+                      <h4 className="font-black text-base text-[#1A3A5F]">
+                        مجلد شهر ({openedArchiveMonth}) فارغ حالياً
+                      </h4>
+                      <p className="text-xs text-slate-600 font-medium mt-1">
+                        تُحفظ السجلات المسجلة خلال هذا الشهر تلقائياً في هذا المجلد.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {dayGroups.map(([dayKey, dayItems]) => {
+                        const isExpanded = Boolean(expandedArchiveDayKeys[dayKey]);
+                        const sortedDayItems = [...dayItems].sort(
+                          (a, b) => resolveSupervisorActivityTimestamp(b) - resolveSupervisorActivityTimestamp(a)
+                        );
+                        return (
+                          <div
+                            key={`sup-arch-day-${dayKey}`}
+                            className="bg-white rounded-2xl border border-[#DCE7F3] shadow-2xs overflow-hidden transition-colors"
+                          >
+                            <button
+                              type="button"
+                              aria-expanded={isExpanded}
+                              onClick={() =>
+                                setExpandedArchiveDayKeys((prev) => ({
+                                  ...prev,
+                                  [dayKey]: !prev[dayKey],
+                                }))
+                              }
+                              className={`w-full px-4 py-3.5 flex items-center justify-between gap-3 text-right transition-colors cursor-pointer ${
+                                isExpanded
+                                  ? 'bg-[#EEF5FC] border-b border-[#C6DCF2]'
+                                  : 'bg-white hover:bg-[#F4F8FC]'
+                              }`}
+                            >
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                {isExpanded ? (
+                                  <FolderOpen className="w-5 h-5 text-amber-600 shrink-0" />
+                                ) : (
+                                  <Folder className="w-5 h-5 text-amber-500 fill-amber-200/60 shrink-0" />
+                                )}
+                                <span className="text-xs sm:text-sm font-black text-[#1A3A5F] truncate">
+                                  {formatArabicDayLabel(dayKey)}
+                                </span>
+                              </div>
+
+                              <div className="flex items-center gap-2.5 shrink-0">
+                                <span className="text-xs font-black text-[#1F5AAA] tabular-nums">
+                                  {sortedDayItems.length} {meta.unitLabel}
+                                </span>
+                                <ChevronDown
+                                  className={`w-4 h-4 text-[#1F5AAA] transition-transform duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none ${
+                                    isExpanded ? 'rotate-180' : ''
+                                  }`}
+                                />
+                              </div>
+                            </button>
+
+                            <div
+                              className={`grid transition-[grid-template-rows,opacity] duration-350 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none ${
+                                isExpanded ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'
+                              }`}
+                            >
+                              <div className="overflow-hidden">
+                                <div className="p-3 sm:p-4 bg-[#F8FAFD] grid grid-cols-1 md:grid-cols-2 gap-3.5">
+                                  {sortedDayItems.map((act, idx) => {
+                                    const delayClass = isExpanded
+                                      ? staggerDelays[Math.min(idx, staggerDelays.length - 1)]
+                                      : 'delay-[0ms]';
+                                    const bucket = normalizeCategoryBucket(act.category);
+                                    const BranchIcon = getActivityBranchIcon(act.category, act.subType);
+                                    const statusStyle = getApprovalBadgeAndFrame(act.approvalStatus || 'pending');
+                                    const imgs = Array.isArray(act.images) ? act.images : [];
+                                    return (
+                                      <div
+                                        key={`sup-arch-item-${act.id}-${idx}`}
+                                        className={`rounded-2xl p-4 sm:p-5 shadow-2xs flex flex-col justify-between gap-3 transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none ${delayClass} ${
+                                          isExpanded ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-2'
+                                        } ${statusStyle.frame}`}
+                                      >
+                                        <div className="space-y-2">
+                                          <div className="flex items-center justify-between flex-wrap gap-1.5">
+                                            <div className="flex flex-wrap items-center gap-1.5">
+                                              <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-black ${statusStyle.badge}`}>
+                                                {statusStyle.label}
+                                              </span>
+                                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-white text-[#1F5AAA] border border-[#C6DCF2] text-[11px] font-black">
+                                                <BranchIcon className="w-3 h-3" />
+                                                <span>{bucket}</span>
+                                              </span>
+                                              {(act.subType || (act.category !== bucket && act.category)) && (
+                                                <span className="px-2 py-0.5 rounded-full bg-white text-[#1A3A5F] border border-[#DCE7F3] text-[11px] font-bold">
+                                                  {act.subType || act.category}
+                                                </span>
+                                              )}
+                                            </div>
+                                            <span className="text-[11px] font-bold text-[#5C7085] tabular-nums">
+                                              {act.activityDate} •{' '}
+                                              {act.targetGrade === 'الكل' || !act.targetGrade
+                                                ? 'جميع الصفوف'
+                                                : getGradeLabelAr(act.targetGrade)}
+                                              {act.targetClass && act.targetClass !== 'الكل'
+                                                ? ` (فصل ${act.targetClass})`
+                                                : ''}
+                                            </span>
+                                          </div>
+
+                                          <h4 className="font-black text-sm text-[#1A3A5F]">{act.title}</h4>
+                                          <p className="text-xs text-slate-700 leading-relaxed whitespace-pre-wrap font-medium">
+                                            {act.formalText || act.details}
+                                          </p>
+
+                                          {act.audioUrl && (
+                                            <div className="pt-1">
+                                              <audio controls src={act.audioUrl} className="w-full h-8" />
+                                            </div>
+                                          )}
+
+                                          {imgs.length > 0 && (
+                                            <div
+                                              className={`grid gap-2 pt-1 ${
+                                                imgs.length === 1
+                                                  ? 'grid-cols-1 max-w-xs'
+                                                  : imgs.length === 2
+                                                  ? 'grid-cols-2'
+                                                  : 'grid-cols-3'
+                                              }`}
+                                            >
+                                              {imgs.map((imgUrl, imgIdx) => (
+                                                <button
+                                                  key={imgIdx}
+                                                  type="button"
+                                                  onClick={() => setLightboxImage(imgUrl)}
+                                                  className="relative rounded-xl overflow-hidden border border-white shadow-xs bg-white aspect-video cursor-pointer"
+                                                  title="معاينة الصورة"
+                                                >
+                                                  <img
+                                                    src={imgUrl}
+                                                    alt={`${act.title} - صورة ${imgIdx + 1}`}
+                                                    className="w-full h-full object-cover"
+                                                  />
+                                                </button>
+                                              ))}
+                                            </div>
+                                          )}
+
+                                          {act.principalNote && (
+                                            <div className="p-2.5 rounded-xl bg-white/90 border border-slate-200 text-xs font-bold text-[#1A3A5F]">
+                                              ملاحظة المدير: {act.principalNote}
+                                            </div>
+                                          )}
+                                        </div>
+
+                                        <div className="pt-2 border-t border-black/10 flex items-center justify-between text-[11px] text-[#5C7085] font-semibold">
+                                          <span>بواسطة: {act.createdBy}</span>
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
+        {/* =================================================================== */}
         {/* TAB 1: الأنشطة (تقرير / نشاط / فعالية + 3 صور -> إرسال للمدير للاعتماد) */}
         {/* =================================================================== */}
-        {activeTab === 'activities' && (
+        {!supervisorArchiveView && activeTab === 'activities' && (
           <div className="space-y-5">
             {/* Branching Pills inside الأنشطة */}
             <div className="bg-white rounded-2xl p-4 sm:p-5 border border-[#DCE7F3] shadow-sm space-y-3">
@@ -1358,15 +1692,15 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                   </div>
                 </div>
 
-                {/* AI Creation Method Selector: Voice-First (Primary, max 2 min) vs Image + 1 Line */}
+                {/* Creation Method Selector: Voice-First (Primary, max 2 min) vs Image + 1 Line */}
                 <div className="space-y-3">
                   <div className="flex items-center justify-between flex-wrap gap-2">
                     <span className="text-xs font-black text-[#1A3A5F] flex items-center gap-1.5">
                       <Sparkles className="w-4 h-4 text-[#1F5AAA]" />
-                      <span>اختر طريقة الصياغة الآلية الاحترافية (بالذكاء الاصطناعي):</span>
+                      <span>اختر طريقة إعداد الصياغة:</span>
                     </span>
                     <span className="text-[11px] font-bold text-[#5C7085]">
-                      صور فقط (مضغوطة JPG) • ممنوع الفيديو نهائياً
+                      صور فقط • ممنوع الفيديو نهائياً
                     </span>
                   </div>
 
@@ -1436,14 +1770,14 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                           </button>
                         )}
                         <p className="text-[11px] font-semibold text-[#5C7085] max-w-md">
-                          تحدث بالعامية بطبيعتك (حتى دقيقتين كحد أقصى) — سيتم حفظ الصوت في Storage، تحويله لنص، ثم صياغته كتقرير رسمي مرتب ومختصر لمراجعتك.
+                          تحدث بالعامية بطبيعتك (حتى دقيقتين كحد أقصى) — ليتم تحويله لنص وصياغته كتقرير رسمي مرتب ومختصر لمراجعتك.
                         </p>
                       </div>
 
                       {isDraftingReport && (
                         <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-white border border-[#C6DCF2] text-[#1F5AAA] text-xs font-black shadow-xs">
                           <RefreshCw className="w-4 h-4 animate-spin" />
-                          <span>جاري رفع الصوت وتحويله لنص وصياغة التقرير الرسمي عبر Gemini...</span>
+                          <span>جاري تحويل الصوت لنص وصياغة التقرير الرسمي...</span>
                         </div>
                       )}
 
@@ -1491,7 +1825,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                             : `صور إضافية مرفقة لـ ${actCategory} (اختياري — حتى 3 صور)`}
                         </p>
                         <p className="text-[11px] font-semibold text-[#5C7085]">
-                          {actImages.length} / 3 صور مرفقة • ضغط تلقائي JPG حتى 1280px (بدون فيديو)
+                          {actImages.length} / 3 صور مرفقة
                         </p>
                       </div>
                       <div className="flex flex-wrap items-center gap-2">
@@ -1569,7 +1903,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                             <span>
                               {isDraftingReport
                                 ? 'جاري صياغة التقرير من الصورة...'
-                                : 'صياغة الوصف الكامل بالذكاء الاصطناعي'}
+                                : 'صياغة الوصف الكامل'}
                             </span>
                           </button>
                         </div>
@@ -1585,13 +1919,13 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                   )}
                 </div>
 
-                {/* MANDATORY SUPERVISOR REVIEW BOX (Cannot send without reviewing draft) */}
-                {hasAiDraftReady ? (
+                {/* SUPERVISOR REVIEW BOX */}
+                {hasAiDraftReady && (
                   <div className="p-4 sm:p-5 rounded-2xl border-2 border-emerald-400 bg-emerald-50/40 space-y-3 animate-in fade-in">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <h4 className="text-xs sm:text-sm font-black text-[#1A3A5F] flex items-center gap-1.5">
                         <ShieldCheck className="w-4 h-4 text-emerald-700" />
-                        <span>مراجعة المشرف للتقرير المقترح من Gemini (إلزامي قبل الإرسال)</span>
+                        <span>مراجعة النص قبل الإرسال</span>
                       </h4>
                       <span className="px-2.5 py-0.5 rounded-full bg-white border border-[#C6DCF2] text-[#1F5AAA] text-[11px] font-black">
                         نوع الإدخال: {actInputType}
@@ -1624,7 +1958,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
 
                     <div>
                       <label className="block text-xs font-bold text-[#1A3A5F] mb-1">
-                        الصياغة الرسمية المقترحة من Gemini — راجع وعدّل قبل الإرسال:
+                        الصياغة الرسمية — راجع وعدّل قبل الإرسال:
                       </label>
                       <textarea
                         rows={4}
@@ -1634,25 +1968,6 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                         required
                       />
                     </div>
-
-                    <label className="flex items-start gap-2.5 p-3 rounded-xl bg-white border border-emerald-300 cursor-pointer select-none">
-                      <input
-                        type="checkbox"
-                        checked={hasReviewedDraft}
-                        onChange={(e) => setHasReviewedDraft(e.target.checked)}
-                        className="mt-0.5 w-4 h-4 accent-[#1F5AAA] shrink-0 cursor-pointer"
-                      />
-                      <span className="text-xs font-black text-[#1A3A5F]">
-                        أؤكد أنني راجعت التقرير المقترح من Gemini وقمت بالتعديلات اللازمة قبل إرساله إلى مدير المدرسة للاعتماد.
-                      </span>
-                    </label>
-                  </div>
-                ) : (
-                  <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-950 text-xs font-bold flex items-center gap-2">
-                    <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0" />
-                    <span>
-                      لتوليد التقرير ومراجعته: سجل صوتك بالميكروفون (حتى دقيقتين) أو أرفق صورة واكتب سطراً واحداً، ثم اضغط صياغة ليظهر لك مربع المراجعة والتعديل قبل الإرسال.
-                    </span>
                   </div>
                 )}
 
@@ -1662,7 +1977,6 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                     disabled={
                       isSavingActivity ||
                       !hasAiDraftReady ||
-                      !hasReviewedDraft ||
                       !actTitle.trim() ||
                       !actDetails.trim()
                     }
@@ -1822,9 +2136,9 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
         )}
 
         {/* =================================================================== */}
-        {/* TAB 2: الحضور والغياب (تصوير -> قراءة Gemini كروت بارزة -> إرسال للمدير للاعتماد) */}
+        {/* TAB 2: الحضور والغياب */}
         {/* =================================================================== */}
-        {activeTab === 'attendance' && (
+        {!supervisorArchiveView && activeTab === 'attendance' && (
           <div className="space-y-5">
             <div className="bg-white rounded-2xl p-5 sm:p-6 border border-[#DCE7F3] shadow-sm space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
@@ -1837,9 +2151,6 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                         : 'تسجيل الحضور والغياب لكل صف بتصوير الكشف'}
                     </span>
                   </h2>
-                  <p className="text-xs text-[#5C7085] font-semibold mt-0.5">
-                    يقرأ Gemini الكشف ويعرضه ككروت بارزة (حاضر / غائب بعذر / غائب بدون عذر / متأخر) ثم يُرسل لمدير المدرسة للاعتماد ويظهر في بوابة المشرف والمدير وحساب الطالب الخاص فقط
-                  </p>
                 </div>
                 <span className="px-3 py-1 rounded-full bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] text-[11px] font-black">
                   يُرسل للمدير للاعتماد
@@ -1968,9 +2279,6 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                     <p className="text-xs sm:text-sm font-black text-[#1A3A5F]">
                       افتح الكاميرا وصوّر كشف الحضور والغياب الورقي للصف المحدد
                     </p>
-                    <p className="text-[11px] text-[#5C7085] font-semibold">
-                      سيقوم Gemini باستقراء الأسماء وعكسها ككروت بارزة (حاضر / غائب بعذر / غائب بدون عذر / متأخر) لمراجعتها وإرسالها للمدير
-                    </p>
                     <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
                       <button
                         type="button"
@@ -1999,7 +2307,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                         className="px-4 py-2.5 rounded-xl bg-white hover:bg-[#EEF5FC] text-[#1A3A5F] border border-[#DCE7F3] text-xs font-black flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
                       >
                         <Plus className="w-4 h-4" />
-                        <span>إضافة طالب يدوياً</span>
+                        <span>إضافة حضور وغياب طالب يدويا</span>
                       </button>
                     </div>
                   </div>
@@ -2008,7 +2316,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                 {isParsingAttendance && (
                   <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-white border border-[#C6DCF2] text-[#1F5AAA] text-xs font-black shadow-xs">
                     <RefreshCw className="w-4 h-4 animate-spin" />
-                    <span>جاري تحليل الكشف وعكسه في كروت بارزة عبر Gemini...</span>
+                    <span>جاري تحليل الكشف وعرض الأسماء...</span>
                   </div>
                 )}
 
@@ -2288,7 +2596,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
         {/* =================================================================== */}
         {/* TAB 3: جدول الحصص الأسبوعي (+ رفع جدول حصص -> ثابت للترم الأول)      */}
         {/* =================================================================== */}
-        {activeTab === 'schedule' && (
+        {!supervisorArchiveView && activeTab === 'schedule' && (
           <div className="space-y-5">
             {/* Header Card with + رفع جدول حصص */}
             <div className="bg-white rounded-2xl p-5 sm:p-6 border border-[#DCE7F3] shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -2375,7 +2683,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                   </div>
                 )}
 
-                {/* Input Method Switcher: Photo OCR (Gemini) vs Manual Entry */}
+                {/* Input Method Switcher: Photo OCR vs Manual Entry */}
                 <div className="grid grid-cols-2 gap-2 p-1.5 bg-[#E6EEF7] rounded-2xl border border-[#C6DCF2]">
                   <button
                     type="button"
@@ -2387,7 +2695,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                     }`}
                   >
                     <Camera className="w-4 h-4" />
-                    <span>تصوير / رفع صورة الجدول (Gemini)</span>
+                    <span>تصوير / رفع صورة الجدول</span>
                   </button>
                   <button
                     type="button"
@@ -2454,7 +2762,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                     {isParsingSchedule && (
                       <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-white border border-[#C6DCF2] text-[#1F5AAA] text-xs font-black shadow-xs">
                         <RefreshCw className="w-4 h-4 animate-spin" />
-                        <span>جاري تحويل صورة الجدول عبر Gemini إلى جدول منظم...</span>
+                        <span>جاري تحويل صورة الجدول إلى جدول منظم...</span>
                       </div>
                     )}
 
@@ -2679,11 +2987,12 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
         onClose={() => setIsSidebarOpen(false)}
         session={session}
         activeView={
-          activeTab === 'activities'
-            ? 'supervisor_activities'
+          supervisorArchiveView ||
+          (activeTab === 'activities'
+            ? 'dashboard'
             : activeTab === 'attendance'
             ? 'supervisor_attendance'
-            : 'supervisor_schedule'
+            : 'supervisor_schedule')
         }
         onSelectView={handleSelectSidebarView}
       />
@@ -2724,9 +3033,14 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
           {/* 1. الأنشطة (تتفرع داخلها) */}
           <button
             type="button"
-            onClick={() => setActiveTab('activities')}
+            onClick={() => {
+              setSupervisorArchiveView(null);
+              setOpenedArchiveMonth(null);
+              setExpandedArchiveDayKeys({});
+              setActiveTab('activities');
+            }}
             className={`min-h-[48px] py-1.5 px-1 rounded-2xl sm:rounded-full flex flex-col sm:flex-row items-center justify-center gap-0.5 sm:gap-1.5 transition-all cursor-pointer ${
-              activeTab === 'activities'
+              !supervisorArchiveView && activeTab === 'activities'
                 ? 'bg-[#EEF5FC] text-[#1F5AAA] font-black shadow-2xs border border-[#C6DCF2]'
                 : 'text-[#5C7085] hover:bg-[#F3F7FB] hover:text-[#1A3A5F] font-bold'
             }`}
@@ -2738,9 +3052,14 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
           {/* 2. الحضور والغياب */}
           <button
             type="button"
-            onClick={() => setActiveTab('attendance')}
+            onClick={() => {
+              setSupervisorArchiveView(null);
+              setOpenedArchiveMonth(null);
+              setExpandedArchiveDayKeys({});
+              setActiveTab('attendance');
+            }}
             className={`min-h-[48px] py-1.5 px-1 rounded-2xl sm:rounded-full flex flex-col sm:flex-row items-center justify-center gap-0.5 sm:gap-1.5 transition-all cursor-pointer ${
-              activeTab === 'attendance'
+              !supervisorArchiveView && activeTab === 'attendance'
                 ? 'bg-[#EEF5FC] text-[#1F5AAA] font-black shadow-2xs border border-[#C6DCF2]'
                 : 'text-[#5C7085] hover:bg-[#F3F7FB] hover:text-[#1A3A5F] font-bold'
             }`}
@@ -2752,9 +3071,14 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
           {/* 3. جدول الحصص */}
           <button
             type="button"
-            onClick={() => setActiveTab('schedule')}
+            onClick={() => {
+              setSupervisorArchiveView(null);
+              setOpenedArchiveMonth(null);
+              setExpandedArchiveDayKeys({});
+              setActiveTab('schedule');
+            }}
             className={`min-h-[48px] py-1.5 px-1 rounded-2xl sm:rounded-full flex flex-col sm:flex-row items-center justify-center gap-0.5 sm:gap-1.5 transition-all cursor-pointer ${
-              activeTab === 'schedule'
+              !supervisorArchiveView && activeTab === 'schedule'
                 ? 'bg-[#EEF5FC] text-[#1F5AAA] font-black shadow-2xs border border-[#C6DCF2]'
                 : 'text-[#5C7085] hover:bg-[#F3F7FB] hover:text-[#1A3A5F] font-bold'
             }`}

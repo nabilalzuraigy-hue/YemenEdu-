@@ -20,6 +20,7 @@ import {
   Activity,
   UserCheck,
   Trophy,
+  Flag,
 } from 'lucide-react';
 import { UserSession } from '../services/authService';
 import { formatArabicSchoolName, getUserInitials } from '../utils/schoolDisplay';
@@ -38,6 +39,9 @@ export type UnifiedSidebarView =
   | 'supervisor_activities'
   | 'supervisor_attendance'
   | 'supervisor_schedule'
+  | 'supervisor_archive_reports'
+  | 'supervisor_archive_events'
+  | 'supervisor_archive_activities'
   | 'archive_monthly'
   | 'archive_teacher_activities'
   | 'archive_school_activities'
@@ -278,21 +282,6 @@ export const UnifiedSidebar: React.FC<UnifiedSidebarProps> = ({
                   <button
                     type="button"
                     onClick={() => {
-                      onSelectView('supervisor_activities');
-                      onClose();
-                    }}
-                    className={`w-full min-h-[44px] px-3 py-2.5 rounded-xl text-sm font-extrabold flex items-center gap-2.5 transition cursor-pointer ${
-                      activeView === 'supervisor_activities'
-                        ? 'bg-white/18 text-white border-r-4 border-white shadow-2xs'
-                        : 'text-white/95 hover:bg-white/10'
-                    }`}
-                  >
-                    <Activity className="w-4 h-4 text-white/90 shrink-0" />
-                    <span className="truncate">الأنشطة والتقارير والفعاليات</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
                       onSelectView('supervisor_attendance');
                       onClose();
                     }}
@@ -324,7 +313,6 @@ export const UnifiedSidebar: React.FC<UnifiedSidebarProps> = ({
               )}
 
               {/* 2. مجلد الأرشفة (ActionForex-style collapsible row: chevron rotates & label underlines on open) */}
-              {session.role !== 'supervisor' && (
               <div>
                 <button
                   type="button"
@@ -601,11 +589,63 @@ export const UnifiedSidebar: React.FC<UnifiedSidebarProps> = ({
                           </button>
                         </>
                       )}
+
+                      {/* SUPERVISOR ARCHIVE SUB-SECTIONS */}
+                      {session.role === 'supervisor' && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              onSelectView('supervisor_archive_reports');
+                              onClose();
+                            }}
+                            className={`w-full min-h-[40px] px-2.5 py-2 rounded-lg text-xs font-bold flex items-center gap-2 transition cursor-pointer ${
+                              activeView === 'supervisor_archive_reports'
+                                ? 'bg-white/18 text-white'
+                                : 'text-white/90 hover:text-white hover:bg-white/10'
+                            }`}
+                          >
+                            <CalendarCheck className="w-3.5 h-3.5 text-white/85 shrink-0" />
+                            <span className="truncate">ارشيف التقارير الشهري</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              onSelectView('supervisor_archive_events');
+                              onClose();
+                            }}
+                            className={`w-full min-h-[40px] px-2.5 py-2 rounded-lg text-xs font-bold flex items-center gap-2 transition cursor-pointer ${
+                              activeView === 'supervisor_archive_events'
+                                ? 'bg-white/18 text-white'
+                                : 'text-white/90 hover:text-white hover:bg-white/10'
+                            }`}
+                          >
+                            <Flag className="w-3.5 h-3.5 text-white/85 shrink-0" />
+                            <span className="truncate">ارشيف الفعاليات الشهري</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              onSelectView('supervisor_archive_activities');
+                              onClose();
+                            }}
+                            className={`w-full min-h-[40px] px-2.5 py-2 rounded-lg text-xs font-bold flex items-center gap-2 transition cursor-pointer ${
+                              activeView === 'supervisor_archive_activities'
+                                ? 'bg-white/18 text-white'
+                                : 'text-white/90 hover:text-white hover:bg-white/10'
+                            }`}
+                          >
+                            <Trophy className="w-3.5 h-3.5 text-amber-200 shrink-0" />
+                            <span className="truncate">ارشيف الأنشطة الشهري</span>
+                          </button>
+                        </>
+                      )}
                     </div>
                   </div>
                 </div>
               </div>
-              )}
 
               {/* 3. حسابي (للطلاب فقط) */}
               {session.role === 'student' && onOpenAccount && (

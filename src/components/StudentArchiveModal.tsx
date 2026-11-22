@@ -17,6 +17,7 @@ import {
   Folder,
   FolderOpen,
   ArrowRight,
+  ChevronDown,
 } from 'lucide-react';
 import { UserSession, getSubjectsForGrade } from '../services/authService';
 import {
@@ -34,6 +35,9 @@ import {
   getGradeLabelAr,
   isObjectiveQuestion,
   getQuestionTimestamp,
+  formatDayKeyFromTimestamp,
+  formatArabicDayLabel,
+  formatArabicDateTime,
 } from '../services/appData';
 import { StudentArchiveSection } from './UnifiedSidebar';
 import { formatArabicSchoolName, getSchoolPrincipalName, isGenericPrincipalSender, isSimulationAnnouncement } from '../utils/schoolDisplay';
@@ -74,6 +78,7 @@ export const StudentArchiveModal: React.FC<StudentArchiveModalProps> = ({
   recommendations,
 }) => {
   const [openedMonthFolder, setOpenedMonthFolder] = useState<string | null>(null);
+  const [expandedHwDayKeys, setExpandedHwDayKeys] = useState<Record<string, boolean>>({});
   const [selectedHwSubject, setSelectedHwSubject] = useState<string>('الكل');
   const [selectedGradeSubject, setSelectedGradeSubject] = useState<string>('الكل');
   const [selectedSchoolActivityCat, setSelectedSchoolActivityCat] = useState<'الكل' | 'تقرير' | 'نشاط' | 'فعالية'>('الكل');
@@ -82,6 +87,7 @@ export const StudentArchiveModal: React.FC<StudentArchiveModalProps> = ({
   useEffect(() => {
     if (isOpen) {
       setOpenedMonthFolder(null);
+      setExpandedHwDayKeys({});
       setSelectedHwSubject('الكل');
       setSelectedGradeSubject('الكل');
     }
@@ -143,17 +149,50 @@ export const StudentArchiveModal: React.FC<StudentArchiveModalProps> = ({
 
   const IconComponent = sectionMeta.icon;
 
+  const resolveArchivedQuestionMonth = (item: any, fallbackMonth?: string): string => {
+    if (item?.month && (ACADEMIC_MONTHS as readonly string[]).includes(item.month)) {
+      return item.month;
+    }
+    const ts = item?.timestamp || getQuestionTimestamp(item) || resolveRecordTimestamp(item);
+    if (ts > 0) return getAcademicMonthFromTimestamp(ts);
+    return fallbackMonth || currentAcademicMonth;
+  };
+
+  // Deduplicated archived homework questions across all batches
+  const getArchivedHwItemsForMonth = (monthName: string) => {
+    const byKey = new Map<string, any>();
+    archivedHomeworkBatches.forEach((b) => {
+      (b.questions || []).forEach((q) => {
+        const qMonth = resolveArchivedQuestionMonth(q, b.monthName);
+        if (qMonth !== monthName) return;
+        const key = q.id || `${q.subject}_${q.questionText}_${q.timestamp}`;
+        if (!byKey.has(key)) {
+          byKey.set(key, { kind: 'question' as const, data: q, timestamp: q.timestamp || getQuestionTimestamp(q) || Date.now(), subject: (q.subject || 'المادة').trim() });
+        }
+      });
+    });
+
+    const batchQIds = new Set(Array.from(byKey.values()).map((v) => v.data.id).filter(Boolean));
+    const todayKey = formatDayKeyFromTimestamp(Date.now());
+    submissions.forEach((s, idx) => {
+      const ts = resolveRecordTimestamp(s);
+      const sMonth = ts > 0 ? getAcademicMonthFromTimestamp(ts) : resolveItemMonth(s);
+      if (sMonth !== monthName) return;
+      if (s.questionId && batchQIds.has(s.questionId)) return;
+      if (ts > 0 && formatDayKeyFromTimestamp(ts) >= todayKey) return;
+      const key = s.questionId || s.id || `sub_${idx}`;
+      if (!byKey.has(key)) {
+        byKey.set(key, { kind: 'submission' as const, data: s, timestamp: ts || Date.now(), subject: (s.subject || 'المادة').trim() });
+      }
+    });
+
+    return Array.from(byKey.values());
+  };
+
   // Count items per academic month folder for visual badges
   const getFolderItemCount = (monthName: string): number => {
     if (section === 'monthly_homework') {
-      const batchQs = archivedHomeworkBatches
-        .filter((b) => (b.monthName || currentAcademicMonth) === monthName)
-        .flatMap((b) => b.questions || []);
-      const batchQIds = new Set(batchQs.map((q) => q.id));
-      const extraSubs = submissions.filter(
-        (s) => resolveItemMonth(s) === monthName && (!s.questionId || !batchQIds.has(s.questionId))
-      );
-      return batchQs.length + extraSubs.length;
+      return getArchivedHwItemsForMonth(monthName).length;
     }
     if (section === 'monthly_grades') {
       const monthGrades = studentGrades.filter((g) => resolveItemMonth(g) === monthName);
@@ -225,7 +264,10 @@ export const StudentArchiveModal: React.FC<StudentArchiveModalProps> = ({
             </div>
             <button
               type="button"
-              onClick={() => setOpenedMonthFolder(null)}
+              onClick={() => {
+                setOpenedMonthFolder(null);
+                setExpandedHwDayKeys({});
+              }}
               className="px-3 py-1.5 rounded-xl bg-white hover:bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] text-xs font-black flex items-center gap-1.5 transition cursor-pointer shadow-2xs"
             >
               <ArrowRight className="w-3.5 h-3.5" />
@@ -259,7 +301,10 @@ export const StudentArchiveModal: React.FC<StudentArchiveModalProps> = ({
                     <button
                       key={`folder-${monthName}`}
                       type="button"
-                      onClick={() => setOpenedMonthFolder(monthName)}
+                      onClick={() => {
+                        setOpenedMonthFolder(monthName);
+                        setExpandedHwDayKeys({});
+                      }}
                       className="group text-right focus:outline-none cursor-pointer"
                     >
                       {/* Computer Desktop Folder Tab */}
@@ -320,41 +365,48 @@ export const StudentArchiveModal: React.FC<StudentArchiveModalProps> = ({
             </div>
           )}
 
-          {/* OPENED FOLDER CONTENT: SECTION 1 - ارشيف الواجب الشهري */}
+          {/* OPENED FOLDER CONTENT: SECTION 1 - ارشيف الواجب الشهري (مطوي حسب اليوم والتاريخ مثل المعلم) */}
           {openedMonthFolder && section === 'monthly_homework' && (() => {
-            const monthBatches = archivedHomeworkBatches.filter(
-              (b) => (b.monthName || currentAcademicMonth) === openedMonthFolder
-            );
-            const allBatchQuestions = monthBatches.flatMap((b) => b.questions || []);
-            const batchQuestionIdSet = new Set(allBatchQuestions.map((q) => q.id));
-
-            // Include submissions from the selected month (transferred from weekly archive)
-            const monthExtraSubmissions = submissions.filter(
-              (s) =>
-                resolveItemMonth(s) === openedMonthFolder &&
-                (!s.questionId || !batchQuestionIdSet.has(s.questionId)) &&
-                (selectedHwSubject === 'الكل' || (s.subject || '').trim() === selectedHwSubject)
-            );
-
+            const allMonthItems = getArchivedHwItemsForMonth(openedMonthFolder);
             const hwSubjectsList = Array.from(
               new Set<string>([
                 ...gradeSubjects,
-                ...allBatchQuestions.map((q) => q.subject).filter(Boolean),
-                ...submissions.filter((s) => resolveItemMonth(s) === openedMonthFolder).map((s) => s.subject).filter(Boolean),
+                ...allMonthItems.map((it) => it.subject).filter(Boolean),
               ])
             );
 
-            const totalCount = allBatchQuestions.length + monthExtraSubmissions.length;
+            const filteredItems = allMonthItems.filter(
+              (it) => selectedHwSubject === 'الكل' || it.subject === selectedHwSubject
+            );
+
+            const dayGroupMap = new Map<string, typeof filteredItems>();
+            for (const item of filteredItems) {
+              const dKey = formatDayKeyFromTimestamp(item.timestamp);
+              const arr = dayGroupMap.get(dKey) || [];
+              arr.push(item);
+              dayGroupMap.set(dKey, arr);
+            }
+            const dayGroups = Array.from(dayGroupMap.entries()).sort((a, b) => b[0].localeCompare(a[0]));
+            const staggerDelays = [
+              'delay-[0ms]',
+              'delay-[45ms]',
+              'delay-[90ms]',
+              'delay-[135ms]',
+              'delay-[180ms]',
+              'delay-[225ms]',
+            ];
 
             return (
               <div className="space-y-4">
-                <div className="p-3 bg-indigo-50/80 rounded-2xl border border-indigo-200 flex flex-wrap items-center justify-between gap-2 text-xs text-indigo-900">
+                <div className="p-3 bg-[#EEF5FC] rounded-2xl border border-[#C6DCF2] flex flex-wrap items-center justify-between gap-2 text-xs text-[#1A3A5F]">
                   <div>
-                    <span className="font-bold block">أرشيف واجبات شهر ({openedMonthFolder})</span>
-                    <span className="text-[11px] text-indigo-700">تُحفظ هنا جميع واجبات وتسليمات الشهر مرتبة حسب المادة</span>
+                    <span className="font-black block">أرشيف واجبات شهر ({openedMonthFolder})</span>
+                    <span className="text-[11px] text-[#5C7085] font-semibold">
+                      الواجبات المؤرشفة منظمة ومطوية حسب التاريخ واليوم — اضغط على اليوم لعرضها
+                    </span>
                   </div>
-                  <span className="font-bold text-indigo-700 bg-white px-2.5 py-1 rounded-xl border border-indigo-200">
-                    {totalCount} واجب / تسليم
+                  <span className="font-black text-[#1F5AAA] bg-white px-2.5 py-1 rounded-xl border border-[#C6DCF2] tabular-nums">
+                    {filteredItems.length} واجب
                   </span>
                 </div>
 
@@ -365,9 +417,9 @@ export const StudentArchiveModal: React.FC<StudentArchiveModalProps> = ({
                       key={`arc-hw-subj-${subjName}-${sIdx}`}
                       type="button"
                       onClick={() => setSelectedHwSubject(subjName)}
-                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition shrink-0 cursor-pointer ${
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition shrink-0 cursor-pointer whitespace-nowrap ${
                         selectedHwSubject === subjName
-                          ? 'bg-[#1E5AA8] text-white shadow-xs'
+                          ? 'bg-[#1F5AAA] text-white shadow-xs'
                           : 'bg-white text-gray-700 hover:bg-gray-100 border border-gray-200'
                       }`}
                     >
@@ -376,64 +428,85 @@ export const StudentArchiveModal: React.FC<StudentArchiveModalProps> = ({
                   ))}
                 </div>
 
-                {totalCount === 0 ? (
-                  <div className="p-8 text-center text-gray-500 bg-white rounded-2xl border border-gray-200 text-xs space-y-1.5">
-                    <BookOpen className="w-9 h-9 text-indigo-300 mx-auto" />
-                    <p className="font-bold text-gray-700">
-                      لا توجد واجبات أو تسليمات مؤرشفة في مجلد شهر ({openedMonthFolder}) حتى الآن.
+                {dayGroups.length === 0 ? (
+                  <div className="p-8 text-center text-gray-500 bg-white rounded-2xl border border-[#DCE7F3] text-xs space-y-1.5">
+                    <BookOpen className="w-9 h-9 text-[#9BBEDF] mx-auto" />
+                    <p className="font-black text-[#1A3A5F]">
+                      لا توجد واجبات مؤرشفة في مجلد شهر ({openedMonthFolder}) حتى الآن.
+                    </p>
+                    <p className="text-[11px] text-[#5C7085]">
+                      تُرحّل الواجبات المجاب عليها من الأيام السابقة تلقائياً إلى هنا عند ظهور يوم جديد.
                     </p>
                   </div>
                 ) : (
-                  <div className="space-y-4">
-                    {/* Archived weekly batches moved under monthly folder */}
-                    {monthBatches.map((batch, bIdx) => {
-                      const batchQuestions = (batch.questions || []).filter(
-                        (q) => selectedHwSubject === 'الكل' || q.subject === selectedHwSubject
-                      );
-                      if (batchQuestions.length === 0) return null;
-
-                      const bySubject = new Map<string, typeof batchQuestions>();
-                      batchQuestions.forEach((q) => {
-                        const subj = q.subject || 'المادة';
-                        const arr = bySubject.get(subj) || [];
-                        arr.push(q);
-                        bySubject.set(subj, arr);
-                      });
+                  <div className="space-y-3">
+                    {dayGroups.map(([dayKey, dayItems]) => {
+                      const isExpanded = Boolean(expandedHwDayKeys[dayKey]);
+                      const sortedDayItems = [...dayItems].sort((a, b) => b.timestamp - a.timestamp);
 
                       return (
                         <div
-                          key={batch.id ? `hw-batch-${batch.id}-${bIdx}` : `hw-batch-idx-${bIdx}`}
-                          className="rounded-2xl border border-indigo-200 bg-white overflow-hidden shadow-2xs"
+                          key={`stu-hw-day-${dayKey}`}
+                          className="bg-white rounded-2xl border border-[#DCE7F3] shadow-2xs overflow-hidden transition-colors"
                         >
-                          <div className="px-4 py-2.5 bg-indigo-50 border-b border-indigo-100 flex flex-wrap items-center justify-between gap-2 text-xs">
-                            <div className="flex items-center gap-2 font-bold text-[#1A3A5F]">
-                              <Calendar className="w-4 h-4 text-[#1E5AA8]" />
-                              <span>{batch.weekLabel}</span>
+                          {/* Collapsible Day & Date Trigger Header (Collapsed by default matching Teacher Archive) */}
+                          <button
+                            type="button"
+                            aria-expanded={isExpanded}
+                            onClick={() =>
+                              setExpandedHwDayKeys((prev) => ({
+                                ...prev,
+                                [dayKey]: !prev[dayKey],
+                              }))
+                            }
+                            className={`w-full px-4 py-3.5 flex items-center justify-between gap-3 text-right transition-colors cursor-pointer ${
+                              isExpanded
+                                ? 'bg-[#EEF5FC] border-b border-[#C6DCF2]'
+                                : 'bg-white hover:bg-[#F4F8FC]'
+                            }`}
+                          >
+                            <div className="flex items-center gap-2.5 min-w-0">
+                              {isExpanded ? (
+                                <FolderOpen className="w-5 h-5 text-amber-600 shrink-0" />
+                              ) : (
+                                <Folder className="w-5 h-5 text-amber-500 fill-amber-200/60 shrink-0" />
+                              )}
+                              <span className="text-xs sm:text-sm font-black text-[#1A3A5F] truncate">
+                                {formatArabicDayLabel(dayKey)}
+                              </span>
                             </div>
-                            <span className="text-[11px] font-bold text-indigo-700 bg-white px-2 py-0.5 rounded-lg border border-indigo-200">
-                              {batchQuestions.length} أسئلة
-                            </span>
-                          </div>
 
-                          <div className="p-3 sm:p-4 space-y-3">
-                            {Array.from(bySubject.entries()).map(([subjName, subjQs], sgIdx) => (
-                              <div key={`batch-${batch.id}-subj-${subjName}-${sgIdx}`} className="space-y-2">
-                                <div className="flex items-center justify-between px-2.5 py-1.5 rounded-xl bg-[#F4F8FC] border border-blue-100">
-                                  <span className="text-xs font-black text-[#1E5AA8] flex items-center gap-1.5">
-                                    <BookOpen className="w-3.5 h-3.5 text-[#0E8A6D]" />
-                                    <span>مادة: {subjName}</span>
-                                  </span>
-                                  <span className="text-[11px] font-bold text-gray-500">
-                                    {subjQs.length} واجب
-                                  </span>
-                                </div>
+                            <div className="flex items-center gap-2.5 shrink-0">
+                              <span className="text-xs font-black text-[#1F5AAA] tabular-nums">
+                                {sortedDayItems.length} واجب
+                              </span>
+                              <ChevronDown
+                                className={`w-4 h-4 text-[#1F5AAA] transition-transform duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none ${
+                                  isExpanded ? 'rotate-180' : ''
+                                }`}
+                              />
+                            </div>
+                          </button>
 
-                                <div className="space-y-2">
-                                  {subjQs.map((q, idx) => {
+                          {/* Smooth Staggered Accordion Body */}
+                          <div
+                            className={`grid transition-[grid-template-rows,opacity] duration-350 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none ${
+                              isExpanded ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'
+                            }`}
+                          >
+                            <div className="overflow-hidden">
+                              <div className="p-3 sm:p-4 bg-[#F8FAFD] grid grid-cols-1 md:grid-cols-2 gap-3.5">
+                                {sortedDayItems.map((entry, idx) => {
+                                  const delayClass = isExpanded
+                                    ? staggerDelays[Math.min(idx, staggerDelays.length - 1)]
+                                    : 'delay-[0ms]';
+
+                                  if (entry.kind === 'question') {
+                                    const q = entry.data;
                                     const matchedSub = submissions.find(
                                       (s) =>
                                         s.questionId === q.id ||
-                                        (s.title && s.title === q.questionText)
+                                        (s.title && (s.title === q.questionText || s.title === q.text))
                                     );
                                     const matchedGrade = studentGrades.find((g) => g.questionId === q.id);
                                     const earnedScore =
@@ -441,87 +514,120 @@ export const StudentArchiveModal: React.FC<StudentArchiveModalProps> = ({
                                       matchedGrade?.obtained ??
                                       matchedSub?.score;
                                     const isAnswered = Boolean(matchedSub || matchedGrade);
+                                    const correctOpt = q.correctOption !== undefined ? q.correctOption : q.correctIndex;
+                                    const chosenOpt = matchedSub?.selectedOption;
 
                                     return (
                                       <div
-                                        key={q.id ? `arc-q-${q.id}-${idx}` : `arc-q-idx-${idx}`}
-                                        className="p-3.5 rounded-2xl bg-white border border-gray-200 shadow-2xs"
+                                        key={q.id ? `stu-arch-q-${q.id}-${idx}` : `stu-arch-q-${dayKey}-${idx}`}
+                                        className={`bg-white rounded-2xl p-4 border border-[#DCE7F3] shadow-2xs flex flex-col justify-between transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none ${delayClass} ${
+                                          isExpanded
+                                            ? 'opacity-100 translate-y-0'
+                                            : 'opacity-0 translate-y-2'
+                                        }`}
                                       >
-                                        <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
-                                          <span className="text-[11px] font-bold text-[#1E5AA8] bg-blue-50 px-2.5 py-0.5 rounded-md">
-                                            {isObjectiveQuestion(q.type) ? 'سؤال موضوعي' : 'واجب مقالي'} • {q.points || 5} درجات
-                                          </span>
-                                          {isAnswered ? (
-                                            <span className="text-[11px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200 flex items-center gap-1">
-                                              <CheckCircle2 className="w-3 h-3" />
-                                              <span>
-                                                تم الحل{earnedScore !== undefined ? ` (${earnedScore}/${q.points || 5})` : ''}
+                                        <div>
+                                          <div className="flex flex-wrap items-center justify-between gap-2 mb-2 text-[11px]">
+                                            <span className="font-black text-[#1F5AAA]">
+                                              {q.subject} • {isObjectiveQuestion(q.type) ? 'سؤال موضوعي' : 'واجب مقالي'}
+                                            </span>
+                                            {isAnswered ? (
+                                              <span className="font-black text-emerald-700 flex items-center gap-1 tabular-nums">
+                                                <CheckCircle2 className="w-3.5 h-3.5" />
+                                                <span>
+                                                  تم الحل{earnedScore !== undefined ? ` (${earnedScore}/${q.points || 5})` : ''}
+                                                </span>
                                               </span>
-                                            </span>
-                                          ) : (
-                                            <span className="text-[11px] font-bold text-gray-500 bg-gray-100 px-2 py-0.5 rounded-md">
-                                              مؤرشف
-                                            </span>
+                                            ) : (
+                                              <span className="font-bold text-slate-500">مؤرشف</span>
+                                            )}
+                                          </div>
+
+                                          <p className="text-xs sm:text-sm font-black text-[#1A3A5F] leading-relaxed mb-2.5">
+                                            {q.questionText || q.text}
+                                          </p>
+
+                                          {Array.isArray(q.options) && q.options.length > 0 && (
+                                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 text-[11px] mb-2.5">
+                                              {q.options.map((opt: string, optIdx: number) => {
+                                                const isCorrect = String(correctOpt) === String(optIdx);
+                                                const isChosen =
+                                                  chosenOpt !== undefined && String(chosenOpt) === String(optIdx);
+                                                return (
+                                                  <div
+                                                    key={`stu-arch-opt-${q.id || idx}-${optIdx}`}
+                                                    className={`p-1.5 rounded-lg border ${
+                                                      isCorrect
+                                                        ? 'bg-emerald-50 border-emerald-300 font-bold text-emerald-900'
+                                                        : isChosen
+                                                        ? 'bg-rose-50 border-rose-300 font-bold text-rose-900'
+                                                        : 'bg-[#F8FAFD] border-slate-200 text-slate-700'
+                                                    }`}
+                                                  >
+                                                    <span className="font-black text-[#1F5AAA]">
+                                                      {optIdx === 0 ? 'أ' : optIdx === 1 ? 'ب' : optIdx === 2 ? 'ج' : 'د'}:{' '}
+                                                    </span>
+                                                    {opt}
+                                                  </div>
+                                                );
+                                              })}
+                                            </div>
                                           )}
                                         </div>
-                                        <p className="text-xs sm:text-sm font-bold text-gray-900 leading-relaxed">
-                                          {q.questionText || (q as any).text}
-                                        </p>
-                                        <div className="mt-2 pt-2 border-t border-gray-100 flex flex-wrap items-center justify-between gap-2 text-[11px] text-gray-500">
-                                          <span>المعلم: {q.teacherName || 'معلم المادة'}</span>
-                                          <span>{q.createdAtFormatted || batch.archivedAt}</span>
+
+                                        <div className="pt-2.5 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2 text-[11px] text-[#5C7085]">
+                                          <span className="font-bold text-[#1A3A5F]">
+                                            المعلم: {q.teacherName || 'معلم المادة'}
+                                          </span>
+                                          <span className="flex items-center gap-1 text-[#1F5AAA] font-bold">
+                                            <Clock className="w-3 h-3" />
+                                            <span>{q.createdAtFormatted || formatArabicDateTime(q.timestamp)}</span>
+                                          </span>
                                         </div>
                                       </div>
                                     );
-                                  })}
-                                </div>
+                                  }
+
+                                  // Fallback: Direct submission entry without matched question record
+                                  const sub = entry.data;
+                                  return (
+                                    <div
+                                      key={sub.id ? `stu-arch-sub-${sub.id}-${idx}` : `stu-arch-sub-${dayKey}-${idx}`}
+                                      className={`bg-white rounded-2xl p-4 border border-[#DCE7F3] shadow-2xs flex flex-col justify-between transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none ${delayClass} ${
+                                        isExpanded
+                                          ? 'opacity-100 translate-y-0'
+                                          : 'opacity-0 translate-y-2'
+                                      }`}
+                                    >
+                                      <div>
+                                        <div className="flex items-center justify-between gap-2 mb-2 text-[11px]">
+                                          <span className="font-black text-[#1F5AAA]">مادة {sub.subject}</span>
+                                          <span className="font-black text-emerald-700 tabular-nums">
+                                            درجة: {sub.score ?? 0} / {sub.maxScore ?? 5}
+                                          </span>
+                                        </div>
+                                        <p className="text-xs sm:text-sm text-[#1A3A5F] font-bold line-clamp-3 mb-2">
+                                          {sub.title || sub.questionText || sub.studentNotes || sub.notes || 'إجابة واجب منزلي'}
+                                        </p>
+                                      </div>
+                                      <div className="flex items-center justify-between text-[11px] text-[#5C7085] pt-2.5 border-t border-slate-100">
+                                        <span className="flex items-center gap-1">
+                                          <Clock className="w-3 h-3 text-[#1F5AAA]" />
+                                          <span>{sub.submittedAtFormatted || sub.submittedAt || 'تم التسليم'}</span>
+                                        </span>
+                                        <span className="text-emerald-700 font-bold">
+                                          {sub.status === 'تم التصحيح' || sub.status === 'graded' ? 'تم التصحيح والاعتماد' : sub.status || 'مرسل'}
+                                        </span>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
                               </div>
-                            ))}
+                            </div>
                           </div>
                         </div>
                       );
                     })}
-
-                    {/* Direct monthly submissions (transferred from old weekly archive) */}
-                    {monthExtraSubmissions.length > 0 && (
-                      <div className="rounded-2xl border border-[#DCE7F3] bg-white p-4 space-y-3 shadow-2xs">
-                        <div className="flex items-center justify-between text-xs font-black text-[#1A3A5F]">
-                          <span>تسليمات واجبات شهر ({openedMonthFolder})</span>
-                          <span className="px-2.5 py-0.5 rounded-full bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2]">
-                            {monthExtraSubmissions.length} تسليم
-                          </span>
-                        </div>
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                          {monthExtraSubmissions.map((sub, idx) => (
-                            <div
-                              key={sub.id ? `m-sub-${sub.id}-${idx}` : `m-sub-idx-${idx}`}
-                              className="p-3.5 rounded-2xl bg-[#F8FAFD] border border-[#DCE7F3]"
-                            >
-                              <div className="flex items-center justify-between gap-2 mb-1.5">
-                                <span className="text-xs font-bold text-[#1E5AA8] bg-white px-2 py-0.5 rounded-md border border-[#C6DCF2]">
-                                  مادة {sub.subject}
-                                </span>
-                                <span className="text-[11px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200">
-                                  درجة: {sub.score ?? 0} / {sub.maxScore ?? 5}
-                                </span>
-                              </div>
-                              <p className="text-xs text-gray-800 font-semibold line-clamp-2 mb-2">
-                                {sub.title || (sub as any).questionText || sub.studentNotes || (sub as any).notes || 'إجابة واجب منزلي'}
-                              </p>
-                              <div className="flex items-center justify-between text-[10px] text-gray-500 pt-2 border-t border-gray-200">
-                                <span className="flex items-center gap-1">
-                                  <Clock className="w-3 h-3 text-gray-400" />
-                                  <span>{(sub as any).submittedAtFormatted || sub.submittedAt || 'تم التسليم'}</span>
-                                </span>
-                                <span className="text-emerald-600 font-bold">
-                                  {sub.status === 'تم التصحيح' || sub.status === 'graded' ? 'تم التصحيح والاعتماد' : sub.status || 'مرسل'}
-                                </span>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
                   </div>
                 )}
               </div>

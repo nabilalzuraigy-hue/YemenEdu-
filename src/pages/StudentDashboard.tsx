@@ -52,6 +52,8 @@ import {
   getSchoolActivityTimestamp,
   isSchoolActivityArchivedForWeek,
   isQuestionArchivedForStudentWeek,
+  isQuestionFromPreviousDayForStudent,
+  formatDayKeyFromTimestamp,
   getHomeworkArchiveCutoffInfo,
   TeacherRecommendation,
   ClassSchedule,
@@ -250,9 +252,15 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
   const [answeredState, setAnsweredState] = useState<Record<string, boolean>>({});
   const [recentlyClosedQIds, setRecentlyClosedQIds] = useState<Record<string, boolean>>({});
 
-  // Periodic tick every 60s so Thursday auto-archiving runs seamlessly while portal is open
+  // Daily Homework Archive Alert Modal State
+  const studentArchiveAckStorageKey = `student_archive_alert_ack_${(session.schoolId || 'default').replace(/[^a-zA-Z0-9_-]/g, '_')}_${(session.code || 'student').replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+  const [studentArchiveAlertOpen, setStudentArchiveAlertOpen] = useState<boolean>(false);
+  const [pendingStudentAckBatchKeys, setPendingStudentAckBatchKeys] = useState<string[]>([]);
+  const [archivedHwNoticeCount, setArchivedHwNoticeCount] = useState<number>(0);
+
+  // Periodic tick every 30s so daily & Thursday auto-archiving runs seamlessly while portal is open
   useEffect(() => {
-    const timer = window.setInterval(() => setNowTick(Date.now()), 60_000);
+    const timer = window.setInterval(() => setNowTick(Date.now()), 30_000);
     return () => window.clearInterval(timer);
   }, []);
 
@@ -340,7 +348,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
     return set;
   }, [rawClassQuestions, activeSubmissions, answeredMap, answeredState]);
 
-  // Only archive questions whose Thursday cutoff passed AND are answered/closed (late unanswered questions remain in واجباتي)
+  // Archive any answered/closed homework from a previous day (or past Thursday cutoff) once a new day starts
   const questions = useMemo(() => {
     const cutoff = rolloverTimestamp || 0;
     return rawClassQuestions.filter((q) => {
@@ -348,17 +356,88 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
         const ts = (q as any).timestamp || getQuestionTimestamp(q) || 0;
         if (ts < cutoff) return false;
       }
-      const isPastThursday = isQuestionArchivedForStudentWeek(q, nowTick);
+      const isDueForArchive =
+        isQuestionFromPreviousDayForStudent(q, nowTick) ||
+        isQuestionArchivedForStudentWeek(q, nowTick);
       const isClosed = q.id ? closedQuestionIds.has(q.id) : false;
       const isShowingFeedback = q.id ? Boolean(recentlyClosedQIds[q.id]) : false;
-      if (isPastThursday && isClosed && !isShowingFeedback) {
+      if (isDueForArchive && isClosed && !isShowingFeedback) {
         return false;
       }
       return true;
     });
   }, [rawClassQuestions, rolloverTimestamp, nowTick, closedQuestionIds, recentlyClosedQIds]);
 
-  // Keep Firestore per-student monthly homework archive synced with closed & Thursday-due questions
+  // Trigger student alert when answered homework from previous days moves to archive
+  useEffect(() => {
+    if (rawClassQuestions.length === 0 || closedQuestionIds.size === 0) return;
+
+    const cutoff = rolloverTimestamp || 0;
+    const archivedPrevDayQs = rawClassQuestions.filter((q) => {
+      if (!q.id || !closedQuestionIds.has(q.id)) return false;
+      if (recentlyClosedQIds[q.id]) return false;
+      const ts = (q as any).timestamp || getQuestionTimestamp(q) || 0;
+      if (cutoff > 0 && ts < cutoff) return false;
+      return (
+        isQuestionFromPreviousDayForStudent(q, nowTick) ||
+        isQuestionArchivedForStudentWeek(q, nowTick)
+      );
+    });
+
+    if (archivedPrevDayQs.length === 0) return;
+
+    let ackSet = new Set<string>();
+    try {
+      const savedAck = localStorage.getItem(studentArchiveAckStorageKey);
+      if (savedAck) ackSet = new Set(JSON.parse(savedAck));
+    } catch {
+      // ignore storage errors
+    }
+
+    const byDay = new Map<string, Question[]>();
+    archivedPrevDayQs.forEach((q) => {
+      const ts = (q as any).timestamp || getQuestionTimestamp(q) || Date.now();
+      const dayKey = formatDayKeyFromTimestamp(ts);
+      const list = byDay.get(dayKey) || [];
+      list.push(q);
+      byDay.set(dayKey, list);
+    });
+
+    const newBatchAckKeys: string[] = [];
+    let newCount = 0;
+    byDay.forEach((dayQs, dayKey) => {
+      const sortedIds = dayQs.map((q) => q.id).filter(Boolean).sort();
+      const batchKey = `${dayKey}_${sortedIds[0] || 'hw'}`;
+      if (!ackSet.has(batchKey)) {
+        newBatchAckKeys.push(batchKey);
+        newCount += dayQs.length;
+      }
+    });
+
+    if (newBatchAckKeys.length > 0) {
+      setPendingStudentAckBatchKeys((prev) => Array.from(new Set([...prev, ...newBatchAckKeys])));
+      setArchivedHwNoticeCount(newCount);
+      setStudentArchiveAlertOpen(true);
+    }
+  }, [rawClassQuestions, closedQuestionIds, recentlyClosedQIds, nowTick, rolloverTimestamp, studentArchiveAckStorageKey]);
+
+  const handleConfirmStudentArchiveAlert = (openArchiveAfter: boolean = false) => {
+    try {
+      const savedAck = localStorage.getItem(studentArchiveAckStorageKey);
+      const ackSet = new Set<string>(savedAck ? JSON.parse(savedAck) : []);
+      pendingStudentAckBatchKeys.forEach((k) => ackSet.add(k));
+      localStorage.setItem(studentArchiveAckStorageKey, JSON.stringify(Array.from(ackSet)));
+    } catch {
+      // ignore storage errors
+    }
+    setPendingStudentAckBatchKeys([]);
+    setStudentArchiveAlertOpen(false);
+    if (openArchiveAfter) {
+      setActiveArchiveModal('monthly_homework');
+    }
+  };
+
+  // Keep Firestore per-student monthly homework archive synced with closed previous-day & Thursday-due questions
   useEffect(() => {
     if (!currentUser?.schoolId || !session.code || rawClassQuestions.length === 0 || closedQuestionIds.size === 0) return;
     appDataService
@@ -373,7 +452,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
       .catch(() => {});
   }, [currentUser?.schoolId, studentGrade, session.code, rawClassQuestions, closedQuestionIds, nowTick]);
 
-  // Merge Firestore archived homework batches with locally-computed closed Thursday batches
+  // Merge Firestore archived homework batches with locally-computed closed previous-day/week batches
   const combinedArchivedHomeworkBatches = useMemo(() => {
     const byId = new Map<string, MonthlyHomeworkArchiveBatch>();
     archivedHomeworkBatches.forEach((b) => byId.set(b.id, b));
@@ -381,7 +460,13 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
     rawClassQuestions.forEach((q) => {
       if (!q.id || !closedQuestionIds.has(q.id)) return;
       const ts = getQuestionTimestamp(q);
-      if (!ts || !isQuestionArchivedForStudentWeek(q, nowTick)) return;
+      if (
+        !ts ||
+        (!isQuestionFromPreviousDayForStudent(q, nowTick) &&
+          !isQuestionArchivedForStudentWeek(q, nowTick))
+      ) {
+        return;
+      }
       const info = getHomeworkArchiveCutoffInfo(ts);
       const batchId = `hw_${session.schoolId}_${session.code}_${info.thursdayKey}`;
       const existing = byId.get(batchId);
@@ -1125,9 +1210,12 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
     setUserAnswers((prev) => ({ ...prev, [question.id]: selectedOption }));
     setAnsweredState((prev) => ({ ...prev, [question.id]: true }));
 
-    // If this question's Thursday archive window already passed (late answer), keep it visible for 3.5s
+    // If this question is from a previous day (or past Thursday cutoff), keep it visible for 3.5s
     // so the student sees their green/red answer and score before it auto-archives into أرشيف الواجب الشهري.
-    if (isQuestionArchivedForStudentWeek(question, nowTick)) {
+    if (
+      isQuestionFromPreviousDayForStudent(question, nowTick) ||
+      isQuestionArchivedForStudentWeek(question, nowTick)
+    ) {
       setRecentlyClosedQIds((prev) => ({ ...prev, [question.id]: true }));
       window.setTimeout(() => {
         setRecentlyClosedQIds((prev) => {
@@ -1135,7 +1223,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
           delete next[question.id];
           return next;
         });
-        setToastMsg('✅ تم التصحيح وإغلاق السؤال وأرشفته تلقائياً في أرشيف الواجب الشهري');
+        setToastMsg('✅ تم التصحيح وإغلاق السؤال وترحيله تلقائياً إلى أرشيف الواجب الشهري');
         window.setTimeout(() => setToastMsg(null), 3500);
       }, 3500);
     }
@@ -1531,10 +1619,15 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
               ? subjectFieldsSummary
               : subjectFieldsSummary.filter((sf) => sf.name === selectedHomeworkSubject);
 
-          const totalArchivedHwCount = combinedArchivedHomeworkBatches.reduce(
-            (sum, b) => sum + (b.questions?.length || 0),
-            0
-          );
+          const totalArchivedHwCount = (() => {
+            const uniqueIds = new Set<string>();
+            combinedArchivedHomeworkBatches.forEach((b) =>
+              (b.questions || []).forEach((q, idx) =>
+                uniqueIds.add(q.id || `${q.subject}_${q.questionText}_${idx}`)
+              )
+            );
+            return uniqueIds.size;
+          })();
 
           return (
             <div className="space-y-4">
@@ -1692,7 +1785,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
                     <div className="p-3.5 sm:p-4 bg-white">
                       {sf.questions.length === 0 ? (
                         <div className="py-4 px-3 text-center text-xs font-semibold text-[#5C7085]">
-                          لا توجد واجبات نشطة حالياً في واجب مادة ({sf.name}) — تُؤرشف الواجبات المجاب عليها والمقفلة تلقائياً يوم الخميس إلى الأرشيف الشهري.
+                          لا توجد واجبات نشطة حالياً في واجب مادة ({sf.name}) — تُرحّل الواجبات المجاب عليها من الأيام السابقة تلقائياً إلى أرشيف الواجب الشهري عند ظهور يوم جديد.
                         </div>
                       ) : (
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -2837,6 +2930,41 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
         onLock={() => window.dispatchEvent(new CustomEvent('trigger-app-lock'))}
         onLogout={() => window.dispatchEvent(new CustomEvent('trigger-app-logout'))}
       />
+
+      {/* Auto-Archive Notification Modal for Student */}
+      {studentArchiveAlertOpen && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-sm w-full p-6 shadow-xl border border-[#DCE7F3] text-center font-['Cairo'] animate-in fade-in zoom-in-95 space-y-4">
+            <div className="w-12 h-12 rounded-2xl bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] flex items-center justify-center mx-auto">
+              <Archive className="w-6 h-6" />
+            </div>
+            <h3 className="text-base font-black text-[#1A3A5F]">
+              تم ترحيل الواجبات إلى الأرشيف
+            </h3>
+            <p className="text-xs text-slate-600 font-semibold leading-relaxed">
+              تم نقل الواجبات المجاب عليها من الأيام السابقة
+              {archivedHwNoticeCount > 0 ? ` (${archivedHwNoticeCount} واجب)` : ''} تلقائياً إلى
+              قسم أرشيف الواجب الشهري قبل بدء واجبات اليوم الجديد.
+            </p>
+            <div className="flex flex-col gap-2">
+              <button
+                type="button"
+                onClick={() => handleConfirmStudentArchiveAlert(false)}
+                className="w-full py-2.5 px-5 bg-[#1F5AAA] hover:bg-[#194B91] text-white rounded-xl text-xs font-black transition shadow-sm border border-[#194B91] cursor-pointer"
+              >
+                حسناً
+              </button>
+              <button
+                type="button"
+                onClick={() => handleConfirmStudentArchiveAlert(true)}
+                className="w-full py-2 px-4 bg-[#EEF5FC] hover:bg-[#DCEAF9] text-[#1F5AAA] rounded-xl text-xs font-black transition border border-[#C6DCF2] cursor-pointer"
+              >
+                عرض في الأرشيف
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
