@@ -109,7 +109,7 @@ export const PrincipalStatsTab: React.FC<PrincipalStatsTabProps> = ({
   const displaySchoolName = formatArabicSchoolName(schoolName, schoolId);
   const [reportMode, setReportMode] = useState<'weekly' | 'monthly' | 'cumulative'>('weekly');
   const [hoveredPoint, setHoveredPoint] = useState<number | null>(null);
-  const [selectedGradeFilter, setSelectedGradeFilter] = useState<'الكل' | 'سابع' | 'ثامن' | 'تاسع'>('الكل');
+  const [selectedGradeFilter, setSelectedGradeFilter] = useState<'سابع' | 'ثامن' | 'تاسع'>('سابع');
   const [liveSubmissions, setLiveSubmissions] = useState<HomeworkSubmission[]>(initialSubmissions);
   const [liveQuestions, setLiveQuestions] = useState<Question[]>([]);
   const [nowTick, setNowTick] = useState<number>(() => Date.now());
@@ -315,7 +315,6 @@ export const PrincipalStatsTab: React.FC<PrincipalStatsTabProps> = ({
 
   // Strict Grade Matching Helper: keeps grades 7, 8, 9 completely isolated
   const matchesGrade = (gradeVal?: string, codeVal?: string): boolean => {
-    if (selectedGradeFilter === 'الكل') return true;
     const g = String(gradeVal || '').trim().toLowerCase();
     const c = String(codeVal || '').trim().toUpperCase();
 
@@ -328,7 +327,7 @@ export const PrincipalStatsTab: React.FC<PrincipalStatsTabProps> = ({
     if (selectedGradeFilter === 'تاسع') {
       return g === '9' || g.includes('تاسع') || g.includes('9') || c.includes('-9-') || c.startsWith('STU-9-');
     }
-    return true;
+    return false;
   };
 
   // Filtered submissions by selected grade
@@ -595,7 +594,7 @@ export const PrincipalStatsTab: React.FC<PrincipalStatsTabProps> = ({
     if (s === '7' || s.includes('سابع')) return 'الصف السابع';
     if (s === '8' || s.includes('ثامن')) return 'الصف الثامن';
     if (s === '9' || s.includes('تاسع')) return 'الصف التاسع';
-    return s ? `الصف ${s}` : 'جميع الصفوف';
+    return s ? `الصف ${s}` : `الصف ال${selectedGradeFilter}`;
   };
 
   const normalizeGradeNum = (gradeVal?: string, codeVal?: string): '7' | '8' | '9' | '' => {
@@ -686,7 +685,7 @@ export const PrincipalStatsTab: React.FC<PrincipalStatsTabProps> = ({
     }
   });
   const displayedMonthlyTeacherActivities = Array.from(archivedActivitiesMap.values())
-    .filter((act) => !act.grade || selectedGradeFilter === 'الكل' || matchesGrade(act.grade))
+    .filter((act) => !act.grade || matchesGrade(act.grade))
     .sort((a, b) => b.timestamp - a.timestamp);
 
   // Handler to archive the selected month into Firestore (includes weekly/monthly teacher activities)
@@ -777,9 +776,8 @@ export const PrincipalStatsTab: React.FC<PrincipalStatsTabProps> = ({
     getSchoolPrincipalName(schoolId, schoolName);
 
   const matchesSupervisorGrade = (gradeVal?: string): boolean => {
-    if (selectedGradeFilter === 'الكل') return true;
     const g = String(gradeVal || '').trim().toLowerCase();
-    if (!g || g === 'all') return true;
+    if (!g || g === 'all' || g === 'الكل') return true;
     if (selectedGradeFilter === 'سابع') return g === '7' || g.includes('سابع');
     if (selectedGradeFilter === 'ثامن') return g === '8' || g.includes('ثامن');
     if (selectedGradeFilter === 'تاسع') return g === '9' || g.includes('تاسع');
@@ -944,22 +942,22 @@ export const PrincipalStatsTab: React.FC<PrincipalStatsTabProps> = ({
           </button>
         </div>
 
-        {/* Grade Isolation Bar (7th / 8th / 9th preserved) */}
+        {/* Grade Isolation Bar (7th / 8th / 9th independent) */}
         <div className="flex items-center justify-between gap-2 flex-wrap bg-white rounded-2xl border border-[#DCE7F3] px-3.5 py-2.5 shadow-xs">
           <span className="text-xs font-black text-[#1A3A5F]">الصف الدراسي:</span>
           <div className="flex items-center gap-1.5 flex-wrap">
-            {(['الكل', 'سابع', 'ثامن', 'تاسع'] as const).map((grade) => (
+            {(['سابع', 'ثامن', 'تاسع'] as const).map((grade) => (
               <button
                 key={grade}
                 type="button"
                 onClick={() => setSelectedGradeFilter(grade)}
-                className={`px-3 py-1 rounded-xl text-[11px] font-black transition cursor-pointer ${
+                className={`px-3 py-1 rounded-xl text-[11px] font-black transition cursor-pointer whitespace-nowrap shrink-0 ${
                   selectedGradeFilter === grade
                     ? 'bg-[#1F5AAA] text-white shadow-xs border border-[#194B91]'
                     : 'bg-[#F0F4F8] text-[#1A3A5F] border border-[#DCE7F3] hover:bg-[#E4EEF8]'
                 }`}
               >
-                {grade === 'الكل' ? 'جميع الصفوف' : `الصف ال${grade}`}
+                {`الصف ال${grade}`}
               </button>
             ))}
           </div>

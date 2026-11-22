@@ -665,7 +665,7 @@ export const PrincipalInboxTab: React.FC<PrincipalInboxTabProps> = ({
                       <GraduationCap className="w-3.5 h-3.5 text-[#1F5AAA]" />
                       <span>
                         {act.targetGrade === 'الكل' || !act.targetGrade
-                          ? 'جميع الصفوف'
+                          ? 'نشاط مدرسي عام'
                           : getGradeLabelAr(act.targetGrade)}
                         {act.targetClass && act.targetClass !== 'الكل' ? ` — فصل ${act.targetClass}` : ''}
                       </span>
