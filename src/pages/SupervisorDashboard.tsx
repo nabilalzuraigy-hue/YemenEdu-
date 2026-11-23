@@ -924,22 +924,27 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
       const response = await fetch(resolveGeminiApiUrl('/api/gemini/parse-schedule'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageBase64: base64, mimeType }),
+        body: JSON.stringify({
+          imageBase64: base64,
+          mimeType,
+          gradeLabel: getGradeLabelAr(schedGrade),
+          classNumber: schedClassNumber,
+        }),
       });
 
       const contentType = response.headers.get('content-type') || '';
       if (!contentType.includes('application/json')) {
-        throw new Error('خدمة قراءة الصور غير متوفرة على هذه الاستضافة الثابتة، يمكنك إدخال الجدول يدوياً من التبويب المجاور.');
+        throw new Error('تعذر الاتصال بخدمة التحويل التلقائي الآن؛ يمكنك رفع صورة الجدول كما هي للاعتماد من المدير أو الإدخال يدوياً.');
       }
 
       const payload = await response.json();
       if (!response.ok) {
-        throw new Error(payload?.error || 'تعذر قراءة جدول الحصص من الصورة.');
+        throw new Error(payload?.error || 'تعذر قراءة جدول الحصص من الصورة، يمكنك رفع الصورة كما هي للاعتماد.');
       }
 
       const extracted: ScheduleSlot[] = Array.isArray(payload?.entries) ? payload.entries : [];
       if (extracted.length === 0) {
-        setSchedParseError('لم يتم العثور على حصص واضحة في الصورة. يمكنك تعديل الجدول أو الإدخال يدوياً أدناه.');
+        setSchedParseError('تعذر استخراج الحصص تلقائياً من هذه الصورة. يمكنك إرسال صورة الجدول كما هي للاعتماد من مدير المدرسة مباشرة أو الإدخال يدوياً أدناه.');
       } else {
         const nextGrid = buildEmptyGridSlots();
         extracted.forEach((slot) => {
@@ -955,16 +960,13 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
         showToast('success', `✨ تم تحويل صورة الجدول إلى (${extracted.length}) حصة منظمة. راجع المواد والمعلمين ثم أرسل للاعتماد.`);
       }
     } catch (err: any) {
-      setSchedParseError(err?.message || 'حدث خطأ أثناء قراءة صورة جدول الحصص.');
+      setSchedParseError(err?.message || 'حدث خطأ أثناء معالجة صورة الجدول، يمكنك رفع الصورة كما هي للاعتماد.');
     } finally {
       setIsParsingSchedule(false);
     }
   };
 
-  const handleSubmitSchedule = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (isSubmittingSchedule) return;
-
+  const collectGridScheduleEntries = (): ScheduleSlot[] => {
     const entries: ScheduleSlot[] = [];
     SCHEDULE_DAYS.forEach((day) => {
       SCHEDULE_PERIODS.forEach((p) => {
@@ -980,32 +982,57 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
         }
       });
     });
+    return entries;
+  };
 
-    if (entries.length === 0) {
-      showToast('error', 'يرجى تعبئة حصة واحدة على الأقل (اسم المادة / المعلم) قبل إرسال الجدول.');
+  const submitSchedulePayload = async (forceImageAsIs = false) => {
+    if (isSubmittingSchedule) return;
+
+    const entries = forceImageAsIs ? [] : collectGridScheduleEntries();
+    const rawPreview = schedImagePreview?.trim() || '';
+
+    if (entries.length === 0 && !rawPreview) {
+      showToast('error', 'يرجى تعبئة حصة واحدة على الأقل (اسم المادة / المعلم) أو إرفاق صورة الجدول لرفعها كما هي.');
       return;
     }
 
     setIsSubmittingSchedule(true);
     try {
+      let safeImageUrl: string | undefined = rawPreview || undefined;
+      if (safeImageUrl && safeImageUrl.length > 320_000) {
+        safeImageUrl = await recompressDataUrl(safeImageUrl, 960, 0.72);
+      }
+
       await appDataService.submitClassScheduleForApproval({
         schoolId,
         grade: schedGrade,
         classNumber: schedClassNumber,
         entries,
+        scheduleImageUrl: safeImageUrl,
         uploadedBy: session.name || 'المشرف',
         supervisorCode: session.code,
-        sourceMethod: schedInputMode,
+        sourceMethod: safeImageUrl && (forceImageAsIs || schedInputMode === 'image') ? 'image' : schedInputMode,
       });
       setIsScheduleComposerOpen(false);
       setSchedImagePreview(null);
+      setSchedParseError(null);
       setSchedGrid(buildEmptyGridSlots());
-      showToast('success', `✅ تم إرسال جدول ${getGradeLabelAr(schedGrade)} (فصل ${schedClassNumber}) للاعتماد من مدير المدرسة.`);
+      showToast(
+        'success',
+        entries.length === 0 && safeImageUrl
+          ? `✅ تم رفع صورة جدول ${getGradeLabelAr(schedGrade)} (فصل ${schedClassNumber}) كما هي وإرسالها للاعتماد من مدير المدرسة.`
+          : `✅ تم إرسال جدول ${getGradeLabelAr(schedGrade)} (فصل ${schedClassNumber}) للاعتماد من مدير المدرسة.`
+      );
     } catch (err: any) {
       showToast('error', err?.message || 'تعذر إرسال الجدول للاعتماد.');
     } finally {
       setIsSubmittingSchedule(false);
     }
+  };
+
+  const handleSubmitSchedule = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await submitSchedulePayload(false);
   };
 
   const presentCount = attEntries.filter((e) => e.status === 'حاضر').length;
@@ -2731,11 +2758,26 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                     />
 
                     {schedImagePreview && (
-                      <img
-                        src={schedImagePreview}
-                        alt="صورة جدول الحصص"
-                        className="max-h-56 mx-auto rounded-xl border border-[#DCE7F3] object-contain bg-white"
-                      />
+                      <div className="space-y-2">
+                        <div className="relative inline-block">
+                          <img
+                            src={schedImagePreview}
+                            alt="صورة جدول الحصص"
+                            className="max-h-56 mx-auto rounded-xl border border-[#DCE7F3] object-contain bg-white"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSchedImagePreview(null);
+                              setSchedParseError(null);
+                            }}
+                            className="absolute top-2 left-2 w-7 h-7 rounded-full bg-rose-600 hover:bg-rose-700 text-white flex items-center justify-center shadow-sm cursor-pointer"
+                            title="إزالة الصورة"
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
                     )}
 
                     <div className="flex flex-wrap items-center justify-center gap-2">
@@ -2767,14 +2809,39 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                     )}
 
                     {schedParseError && (
-                      <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-900 text-xs font-bold">
-                        ⚠️ {schedParseError}
+                      <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-900 text-xs font-bold space-y-2.5">
+                        <p>⚠️ {schedParseError}</p>
+                        {schedImagePreview && (
+                          <button
+                            type="button"
+                            disabled={isSubmittingSchedule}
+                            onClick={() => submitSchedulePayload(true)}
+                            className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black inline-flex items-center gap-1.5 shadow-xs cursor-pointer disabled:opacity-50"
+                          >
+                            <Send className="w-3.5 h-3.5" />
+                            <span>{isSubmittingSchedule ? 'جاري الرفع...' : 'رفع صورة الجدول كما هي وإرسالها للاعتماد'}</span>
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    {!schedParseError && !isParsingSchedule && schedImagePreview && (
+                      <div className="pt-1">
+                        <button
+                          type="button"
+                          disabled={isSubmittingSchedule}
+                          onClick={() => submitSchedulePayload(true)}
+                          className="px-4 py-2 rounded-xl bg-white hover:bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] text-xs font-black inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                        >
+                          <ImageIcon className="w-3.5 h-3.5" />
+                          <span>رفع هذه الصورة كما هي للاعتماد بدون تعديل الجدول</span>
+                        </button>
                       </div>
                     )}
                   </div>
                 )}
 
-                {/* Structured Editable Grid (Review AI output OR Enter manually: السبت-الأربعاء × الحصة 1-6) */}
+                {/* Structured Editable Grid (Review extracted output OR Enter manually: السبت-الأربعاء × الحصة 1-6) */}
                 <div className="space-y-2">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <h4 className="text-xs sm:text-sm font-black text-[#1A3A5F]">
@@ -2962,7 +3029,8 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({ sessio
                         {isOpen && (
                           <div className="pt-2 border-t border-slate-100 space-y-3">
                             <ScheduleGridView
-                              entries={sch.hasPendingUpdate && sch.pendingEntries ? sch.pendingEntries : sch.entries}
+                              entries={sch.hasPendingUpdate ? (sch.pendingEntries || []) : sch.entries}
+                              scheduleImageUrl={sch.hasPendingUpdate ? sch.pendingScheduleImageUrl : sch.scheduleImageUrl}
                               title={
                                 sch.hasPendingUpdate
                                   ? 'معاينة النسخة الجديدة المرسلة للاعتماد'

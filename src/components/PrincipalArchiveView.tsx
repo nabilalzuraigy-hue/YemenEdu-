@@ -1,7 +1,6 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import {
   CalendarCheck,
-  Award,
   Megaphone,
   Search,
   Download,
@@ -25,6 +24,7 @@ import { db } from '../firebase/config';
 import {
   ACADEMIC_MONTHS,
   Announcement,
+  DailyStatsArchiveRecord,
   HomeworkSubmission,
   MonthlyReportRecord,
   Question,
@@ -35,6 +35,8 @@ import {
   SupervisorActivity,
   SupervisorActivityCategory,
   appDataService,
+  doesAnnouncementMatchGrade,
+  formatAnnouncementTargetGradesAr,
   formatArabicDateTime,
   formatArabicDayLabel,
   formatDayKeyFromTimestamp,
@@ -58,7 +60,6 @@ interface PrincipalArchiveViewProps {
     | 'archive_monthly'
     | 'archive_teacher_activities'
     | 'archive_school_activities'
-    | 'archive_cumulative'
     | 'archive_circulars';
   schoolId: string;
   schoolName: string;
@@ -120,6 +121,7 @@ export const PrincipalArchiveView: React.FC<PrincipalArchiveViewProps> = ({
   const [selectedReportDetail, setSelectedReportDetail] = useState<any | null>(null);
 
   const [savedMonthlyReports, setSavedMonthlyReports] = useState<MonthlyReportRecord[]>([]);
+  const [dailyStatsRecords, setDailyStatsRecords] = useState<DailyStatsArchiveRecord[]>([]);
   const [teacherActivityBatches, setTeacherActivityBatches] = useState<TeacherActivityArchiveBatch[]>([]);
   const [liveQuestions, setLiveQuestions] = useState<Question[]>(() =>
     schoolId ? appDataService.getQuestions(undefined, undefined, schoolId) : []
@@ -133,6 +135,9 @@ export const PrincipalArchiveView: React.FC<PrincipalArchiveViewProps> = ({
   const [selectedSchoolActivityCat, setSelectedSchoolActivityCat] = useState<
     'الكل' | 'تقرير' | 'نشاط' | 'فعالية'
   >('الكل');
+  const [selectedSchoolActivityScope, setSelectedSchoolActivityScope] = useState<
+    'الكل' | 'الصف_فقط' | 'عام'
+  >('الكل');
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
 
   // Reset opened month folder & collapsed day accordions whenever switching archive sections
@@ -145,6 +150,7 @@ export const PrincipalArchiveView: React.FC<PrincipalArchiveViewProps> = ({
     if (!schoolId) return;
     const normalizedSchool = schoolId.trim().toLowerCase();
     appDataService.getArchivedMonthlyReports(schoolId).then(setSavedMonthlyReports).catch(() => {});
+    appDataService.getArchivedDailyStats(schoolId).then(setDailyStatsRecords).catch(() => {});
     appDataService.getArchivedTeacherActivityBatches(schoolId).then(setTeacherActivityBatches).catch(() => {});
     appDataService.getArchivedSchoolActivityBatches(schoolId).then(setSchoolActivityBatches).catch(() => {});
 
@@ -163,8 +169,16 @@ export const PrincipalArchiveView: React.FC<PrincipalArchiveViewProps> = ({
               (r) =>
                 r.recordType !== 'teacher_activities_archive' &&
                 r.recordType !== 'monthly_homework_archive' &&
-                r.recordType !== 'school_activities_archive'
+                r.recordType !== 'school_activities_archive' &&
+                r.recordType !== 'daily_stats_archive'
             ) as MonthlyReportRecord[]
+          );
+          setDailyStatsRecords(
+            (allDocs.filter((r) => r.recordType === 'daily_stats_archive') as DailyStatsArchiveRecord[]).sort(
+              (a, b) =>
+                (b.dayKey || '').localeCompare(a.dayKey || '') ||
+                (b.archivedTimestamp || 0) - (a.archivedTimestamp || 0)
+            )
           );
           setTeacherActivityBatches(
             (allDocs.filter((r) => r.recordType === 'teacher_activities_archive') as TeacherActivityArchiveBatch[]).sort(
@@ -210,7 +224,7 @@ export const PrincipalArchiveView: React.FC<PrincipalArchiveViewProps> = ({
             .sort((a, b) => (b.approvedAt || b.createdAt || 0) - (a.approvedAt || a.createdAt || 0));
           setApprovedSchoolActivities(list);
           if (list.length > 0) {
-            appDataService.syncThursdaySchoolActivitiesArchive(schoolId, list, Date.now()).catch(() => {});
+            appDataService.syncDailySchoolActivitiesArchive(schoolId, list, Date.now()).catch(() => {});
           }
         },
         () => {}
@@ -419,6 +433,27 @@ export const PrincipalArchiveView: React.FC<PrincipalArchiveViewProps> = ({
     });
   }, [monthlyReportsList, selectedGrade, searchQuery]);
 
+  const filteredDailyStatsForGrade = useMemo(() => {
+    return dailyStatsRecords.filter((rec) => {
+      if (rec.grade !== selectedGrade) return false;
+      if (rec.year && rec.year !== selectedYear) return false;
+      if (searchQuery.trim()) {
+        const q = searchQuery.trim().toLowerCase();
+        const dayLabel = formatArabicDayLabel(rec.dayKey).toLowerCase();
+        const gradeLabel = getGradeLabelAr(rec.grade).toLowerCase();
+        if (
+          !rec.dayKey.toLowerCase().includes(q) &&
+          !dayLabel.includes(q) &&
+          !(rec.monthName || '').toLowerCase().includes(q) &&
+          !gradeLabel.includes(q)
+        ) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }, [dailyStatsRecords, selectedGrade, selectedYear, searchQuery]);
+
   // Normalized Teacher Activities (Batches + Live/Archived Questions deduplicated)
   const filteredTeacherActivities = useMemo(() => {
     const byId = new Map<string, NormalizedTeacherActivityEntry>();
@@ -566,13 +601,18 @@ export const PrincipalArchiveView: React.FC<PrincipalArchiveViewProps> = ({
         ) {
           return false;
         }
-        if (
-          act.targetGrade &&
-          act.targetGrade !== 'الكل' &&
-          act.targetGrade !== 'عام' &&
-          act.targetGrade !== 'all' &&
-          !matchesGrade(act.targetGrade, '', selectedGrade)
-        ) {
+        const isGeneral =
+          !act.targetGrade ||
+          act.targetGrade === 'الكل' ||
+          act.targetGrade === 'عام' ||
+          act.targetGrade === 'all';
+        if (selectedSchoolActivityScope === 'عام' && !isGeneral) {
+          return false;
+        }
+        if (selectedSchoolActivityScope === 'الصف_فقط' && (isGeneral || !matchesGrade(act.targetGrade, '', selectedGrade))) {
+          return false;
+        }
+        if (selectedSchoolActivityScope === 'الكل' && !isGeneral && !matchesGrade(act.targetGrade, '', selectedGrade)) {
           return false;
         }
         if (searchQuery.trim()) {
@@ -592,12 +632,13 @@ export const PrincipalArchiveView: React.FC<PrincipalArchiveViewProps> = ({
     approvedSchoolActivities,
     selectedYear,
     selectedSchoolActivityCat,
+    selectedSchoolActivityScope,
     selectedGrade,
     searchQuery,
     currentAcademicMonth,
   ]);
 
-  // Filtered Circulars with resolved academic month & timestamp
+  // Filtered Circulars with resolved academic month, target grade matching & timestamp
   const filteredCirculars = useMemo(() => {
     return announcements
       .filter((a) => !isSimulationAnnouncement(a))
@@ -616,6 +657,7 @@ export const PrincipalArchiveView: React.FC<PrincipalArchiveViewProps> = ({
       })
       .filter((anc) => {
         if (anc._year && anc._year !== selectedYear) return false;
+        if (!doesAnnouncementMatchGrade(anc, selectedGrade)) return false;
         if (searchQuery.trim()) {
           const q = searchQuery.toLowerCase();
           const sender =
@@ -631,26 +673,7 @@ export const PrincipalArchiveView: React.FC<PrincipalArchiveViewProps> = ({
         return true;
       })
       .sort((a, b) => b._ts - a._ts);
-  }, [announcements, selectedYear, searchQuery, schoolId, schoolName]);
-
-  // Cumulative data for the selected independent grade
-  const cumulativeStudents = useMemo(() => {
-    return buildStudentPerformance(selectedGrade);
-  }, [selectedGrade, submissions]);
-
-  const cumulativeTotalSubs = cumulativeStudents.reduce((sum, s) => sum + s.submissionsCount, 0);
-  const cumulativeAvg =
-    cumulativeStudents.length > 0
-      ? Math.round(
-          cumulativeStudents.reduce((sum, s) => sum + s.gpa, 0) / cumulativeStudents.length
-        )
-      : 0;
-  const cumulativePassRate =
-    cumulativeStudents.length > 0
-      ? Math.round(
-          (cumulativeStudents.filter((s) => s.gpa >= 50).length / cumulativeStudents.length) * 100
-        )
-      : 0;
+  }, [announcements, selectedYear, selectedGrade, searchQuery, schoolId, schoolName]);
 
   const groupItemsByDay = <T,>(items: T[], getTs: (item: T) => number) => {
     const map = new Map<string, T[]>();
@@ -719,7 +742,7 @@ export const PrincipalArchiveView: React.FC<PrincipalArchiveViewProps> = ({
               {view === 'archive_monthly' && (
                 <>
                   <CalendarCheck className="w-5 h-5 text-[#1F5AAA]" />
-                  <span>أرشيف التقارير الشهرية</span>
+                  <span>أرشيف الإحصائيات</span>
                 </>
               )}
               {view === 'archive_teacher_activities' && (
@@ -734,12 +757,6 @@ export const PrincipalArchiveView: React.FC<PrincipalArchiveViewProps> = ({
                   <span>أرشفة الأنشطة المدرسية</span>
                 </>
               )}
-              {view === 'archive_cumulative' && (
-                <>
-                  <Award className="w-5 h-5 text-[#1F5AAA]" />
-                  <span>أرشيف التقرير التراكمي السنوي</span>
-                </>
-              )}
               {view === 'archive_circulars' && (
                 <>
                   <Megaphone className="w-5 h-5 text-[#1F5AAA]" />
@@ -748,10 +765,12 @@ export const PrincipalArchiveView: React.FC<PrincipalArchiveViewProps> = ({
               )}
             </h2>
             <p className="text-xs text-slate-600 font-semibold">
-              {view === 'archive_teacher_activities'
+              {view === 'archive_monthly'
+                ? 'إحصائيات التسليمات اليومية المؤرشفة تلقائياً عند اكتمال ترحيل التسليمات والملخصات الشهرية'
+                : view === 'archive_teacher_activities'
                 ? 'أرشيف أنشطة المعلمين مصنفة في مجلدات شهرية وتواريخ يومية منسدلة'
                 : view === 'archive_school_activities'
-                ? 'التقارير والأنشطة والفعاليات المدرسية المعتمدة في مجلدات شهرية وتواريخ يومية'
+                ? 'التقارير والأنشطة والفعاليات المدرسية المعتمدة — تُؤرشف قبل بداية اليوم التالي وتُعرض حسب الصف'
                 : 'سجل الأرشيف المدرسي المعتمد'}
             </p>
           </div>
@@ -805,18 +824,21 @@ export const PrincipalArchiveView: React.FC<PrincipalArchiveViewProps> = ({
         </div>
       </div>
 
-      {/* VIEW 1: MONTHLY REPORTS ARCHIVE (Computer Desktop Folders) */}
+      {/* VIEW 1: STATS ARCHIVE (Daily Rollover Stats + Monthly Summary Folders) */}
       {view === 'archive_monthly' && (
         <div className="space-y-4">
           {!openedMonthFolder ? (
             <ComputerMonthFoldersGrid
               currentMonth={currentAcademicMonth}
               getCountForMonth={(monthName) => {
+                const dailyCount = filteredDailyStatsForGrade.filter(
+                  (d) => d.monthName === monthName
+                ).length;
                 const match = filteredMonthlyReportsForGrade.find((r) => r.month === monthName);
-                return match && match.studentsCount > 0 ? 1 : 0;
+                return dailyCount > 0 ? dailyCount : match && match.studentsCount > 0 ? 1 : 0;
               }}
-              unitLabel="كشف"
-              headerTitle={`مجلدات التقارير الشهرية (${selectedGradeLabel}) — اضغط لفتح الشهر:`}
+              unitLabel="إحصائية"
+              headerTitle={`مجلدات أرشيف الإحصائيات (${selectedGradeLabel}) — اضغط لفتح الشهر:`}
               onSelectMonth={(monthName) => {
                 setOpenedMonthFolder(monthName);
                 setExpandedDayKeys({});
@@ -824,112 +846,288 @@ export const PrincipalArchiveView: React.FC<PrincipalArchiveViewProps> = ({
             />
           ) : (
             <div className="space-y-4">
-              {renderFolderBackHeader(openedMonthFolder, `${selectedGradeLabel}`)}
-
               {(() => {
+                const monthDailyStats = filteredDailyStatsForGrade.filter(
+                  (d) => d.monthName === openedMonthFolder
+                );
                 const monthReports = filteredMonthlyReportsForGrade.filter(
                   (r) => r.month === openedMonthFolder
                 );
-                if (monthReports.length === 0) {
-                  return (
-                    <div className="bg-white rounded-2xl p-8 border border-[#DCE7F3] text-center text-slate-600 font-bold text-sm">
-                      لا توجد تقارير مطابقة لخيارات البحث في هذا المجلد
-                    </div>
-                  );
-                }
 
                 return (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {monthReports.map((report) => {
-                      const gradeLabel = getGradeLabelAr(report.grade);
-                      const students = buildStudentPerformance(report.grade);
+                  <div className="space-y-4">
+                    {renderFolderBackHeader(
+                      openedMonthFolder,
+                      `${monthDailyStats.length} إحصائية يومية`
+                    )}
 
-                      return (
-                        <div
-                          key={report.id}
-                          className="bg-white rounded-2xl p-5 border border-[#DCE7F3] shadow-sm hover:shadow-md transition flex flex-col justify-between"
-                        >
-                          <div>
-                            <div className="flex items-center justify-between flex-wrap gap-1.5 mb-3">
-                              <span className="text-xs font-black text-[#1F5AAA]">
-                                شهر {report.month} {report.year}
-                              </span>
-                              <span className="text-xs font-bold text-emerald-700">
-                                مؤرشف ومعتمد
-                              </span>
-                            </div>
+                    {/* Daily Auto-Archived Stats (Rollover Completed) */}
+                    {monthDailyStats.length > 0 && (
+                      <div className="space-y-2.5">
+                        <div className="flex items-center justify-between px-1">
+                          <h3 className="text-xs sm:text-sm font-black text-[#1A3A5F]">
+                            الإحصائيات اليومية المؤرشفة عند اكتمال الترحيل
+                          </h3>
+                          <span className="text-[11px] font-bold text-[#1F5AAA] tabular-nums">
+                            {monthDailyStats.length} يوم
+                          </span>
+                        </div>
 
-                            <h4 className="font-black text-[#1A3A5F] text-sm mb-1">
-                              تقرير إنجاز وتقويم الطلاب
-                            </h4>
-                            <p className="text-xs text-slate-600 mb-3 font-semibold">
-                              {gradeLabel} • {schoolName}
-                            </p>
+                        {monthDailyStats.map((dayStat) => {
+                          const accordionKey = `stats_${dayStat.id}`;
+                          const isExpanded = Boolean(expandedDayKeys[accordionKey]);
+                          const gradeLabel = getGradeLabelAr(dayStat.grade);
+                          const reportStudents: PrincipalStudentReportItem[] = (
+                            dayStat.studentAverages || []
+                          ).map((st) => ({
+                            studentName: st.studentName,
+                            grade: st.grade || dayStat.grade,
+                            submissionsCount: st.submissionsCount,
+                            gpa: st.gpa,
+                            status: st.status,
+                          }));
 
-                            <div className="grid grid-cols-3 gap-2 bg-[#F8FAFC] p-2.5 rounded-xl border border-gray-200 text-center mb-4">
-                              <div>
-                                <span className="text-[11px] text-gray-500 block">الطلاب</span>
-                                <span className="font-bold text-xs text-gray-800 tabular-nums">
-                                  {report.studentsCount}
-                                </span>
-                              </div>
-                              <div>
-                                <span className="text-[11px] text-gray-500 block">التسليمات</span>
-                                <span className="font-bold text-xs text-indigo-700 tabular-nums">
-                                  {report.submissionsCount}
-                                </span>
-                              </div>
-                              <div>
-                                <span className="text-[11px] text-gray-500 block">متوسط الأداء</span>
-                                <span className="font-bold text-xs text-emerald-700 tabular-nums">
-                                  {report.avgScore}%
-                                </span>
-                              </div>
-                            </div>
-                          </div>
-
-                          <div className="flex items-center gap-2 pt-3 border-t border-slate-200">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                onOpenPdfModal({
-                                  reportTitle: `كشف تقويم وإنجاز الطلاب الشهري (شهر ${report.month})`,
-                                  periodLabel: `شهر ${report.month} ${report.year}`,
-                                  isAnnual: false,
-                                  gradeLabel,
-                                  students,
-                                });
-                              }}
-                              className="flex-1 py-2 px-3 rounded-xl bg-[#1F5AAA] hover:bg-[#194B91] text-white text-xs font-black transition flex items-center justify-center gap-1.5 shadow-sm cursor-pointer border border-[#194B91] whitespace-nowrap"
+                          return (
+                            <div
+                              key={dayStat.id}
+                              className="bg-white rounded-2xl border border-[#DCE7F3] shadow-2xs overflow-hidden transition-colors"
                             >
-                              <Download className="w-3.5 h-3.5 shrink-0" />
-                              <span>تحميل PDF A4</span>
-                            </button>
+                              <button
+                                type="button"
+                                aria-expanded={isExpanded}
+                                onClick={() => toggleDayKey(accordionKey)}
+                                className={`w-full px-4 py-3.5 flex items-center justify-between gap-3 text-right transition-colors cursor-pointer ${
+                                  isExpanded
+                                    ? 'bg-[#EEF5FC] border-b border-[#C6DCF2]'
+                                    : 'bg-white hover:bg-[#F4F8FC]'
+                                }`}
+                              >
+                                <div className="flex items-center gap-2.5 min-w-0">
+                                  {isExpanded ? (
+                                    <FolderOpen className="w-5 h-5 text-amber-600 shrink-0" />
+                                  ) : (
+                                    <Folder className="w-5 h-5 text-amber-500 fill-amber-200/60 shrink-0" />
+                                  )}
+                                  <span className="text-xs sm:text-sm font-black text-[#1A3A5F] truncate">
+                                    {formatArabicDayLabel(dayStat.dayKey)}
+                                  </span>
+                                </div>
 
-                            <button
-                              type="button"
-                              onClick={() => {
-                                const matchedSaved = savedMonthlyReports.find(
-                                  (sr) => sr.monthName === report.month && sr.year === report.year
-                                );
-                                const savedActs = (matchedSaved?.teacherActivities || []).filter(
-                                  (act) => !act.grade || matchesGrade(act.grade, '', report.grade)
-                                );
-                                setSelectedReportDetail({
-                                  ...report,
-                                  students,
-                                  teacherActivities: savedActs,
-                                });
-                              }}
-                              className="p-2 rounded-xl bg-[#EEF5FC] hover:bg-[#E0ECF9] text-[#1F5AAA] border border-[#C6DCF2] transition cursor-pointer shrink-0"
-                              title="معاينة الطلاب"
-                            >
-                              <Eye className="w-4 h-4" />
-                            </button>
+                                <div className="flex items-center gap-2.5 shrink-0">
+                                  <span className="text-xs font-black text-[#1F5AAA] tabular-nums">
+                                    {dayStat.totalSubmissions} تسليم · {dayStat.averageScore}%
+                                  </span>
+                                  <ChevronDown
+                                    className={`w-4 h-4 text-[#1F5AAA] transition-transform duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none ${
+                                      isExpanded ? 'rotate-180' : ''
+                                    }`}
+                                  />
+                                </div>
+                              </button>
+
+                              <div
+                                className={`grid transition-[grid-template-rows,opacity] duration-350 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none ${
+                                  isExpanded ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'
+                                }`}
+                              >
+                                <div className="overflow-hidden">
+                                  <div className="p-4 bg-[#F8FAFD] space-y-3">
+                                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center">
+                                      <div className="bg-white rounded-xl p-2.5 border border-[#DCE7F3]">
+                                        <span className="text-[11px] text-slate-500 block font-bold">الطلاب</span>
+                                        <span className="text-sm font-black text-[#1A3A5F] tabular-nums">
+                                          {dayStat.studentsCount}
+                                        </span>
+                                      </div>
+                                      <div className="bg-white rounded-xl p-2.5 border border-[#DCE7F3]">
+                                        <span className="text-[11px] text-slate-500 block font-bold">التسليمات المرحّلة</span>
+                                        <span className="text-sm font-black text-[#1F5AAA] tabular-nums">
+                                          {dayStat.totalSubmissions}
+                                        </span>
+                                      </div>
+                                      <div className="bg-white rounded-xl p-2.5 border border-[#DCE7F3]">
+                                        <span className="text-[11px] text-slate-500 block font-bold">متوسط الأداء</span>
+                                        <span className="text-sm font-black text-emerald-700 tabular-nums">
+                                          {dayStat.averageScore}%
+                                        </span>
+                                      </div>
+                                      <div className="bg-white rounded-xl p-2.5 border border-[#DCE7F3]">
+                                        <span className="text-[11px] text-slate-500 block font-bold">نسبة النجاح</span>
+                                        <span className="text-sm font-black text-amber-700 tabular-nums">
+                                          {dayStat.passRate}%
+                                        </span>
+                                      </div>
+                                    </div>
+
+                                    {Array.isArray(dayStat.subjectBreakdown) && dayStat.subjectBreakdown.length > 0 && (
+                                      <div className="bg-white rounded-xl p-3 border border-[#DCE7F3] space-y-2">
+                                        <span className="text-[11px] font-black text-[#1A3A5F] block">
+                                          ملخص التسليمات حسب المواد
+                                        </span>
+                                        <div className="flex flex-wrap gap-1.5">
+                                          {dayStat.subjectBreakdown.map((sb) => (
+                                            <span
+                                              key={sb.name}
+                                              className="px-2.5 py-1 rounded-lg bg-[#EEF5FC] border border-[#C6DCF2] text-[11px] font-bold text-[#1A3A5F]"
+                                            >
+                                              {sb.name}: {sb.count} ({sb.percent}%)
+                                            </span>
+                                          ))}
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    <div className="flex flex-wrap items-center gap-2 pt-1">
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          onOpenPdfModal({
+                                            reportTitle: `كشف إحصائيات يوم ${formatArabicDayLabel(dayStat.dayKey)}`,
+                                            periodLabel: formatArabicDayLabel(dayStat.dayKey),
+                                            isAnnual: false,
+                                            gradeLabel,
+                                            students: reportStudents,
+                                          });
+                                        }}
+                                        className="flex-1 py-2 px-3 rounded-xl bg-[#1F5AAA] hover:bg-[#194B91] text-white text-xs font-black transition flex items-center justify-center gap-1.5 shadow-sm cursor-pointer border border-[#194B91] whitespace-nowrap"
+                                      >
+                                        <Download className="w-3.5 h-3.5 shrink-0" />
+                                        <span>تحميل كشف اليوم PDF A4</span>
+                                      </button>
+
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setSelectedReportDetail({
+                                            month: formatArabicDayLabel(dayStat.dayKey),
+                                            year: dayStat.year,
+                                            grade: dayStat.grade,
+                                            studentsCount: dayStat.studentsCount,
+                                            students: reportStudents,
+                                            teacherActivities: [],
+                                          });
+                                        }}
+                                        className="px-3 py-2 rounded-xl bg-white hover:bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] text-xs font-black transition cursor-pointer flex items-center gap-1.5 shrink-0"
+                                      >
+                                        <Eye className="w-3.5 h-3.5" />
+                                        <span>معاينة الطلاب</span>
+                                      </button>
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {/* Monthly Summary Sheet */}
+                    {monthReports.length === 0 && monthDailyStats.length === 0 ? (
+                      <div className="bg-white rounded-2xl p-8 border border-[#DCE7F3] text-center text-slate-600 font-bold text-sm">
+                        لا توجد إحصائيات مطابقة لخيارات البحث في هذا المجلد
+                      </div>
+                    ) : (
+                      monthReports.length > 0 && (
+                        <div className="space-y-2.5">
+                          <h3 className="text-xs sm:text-sm font-black text-[#1A3A5F] px-1">
+                            الملخص الشهري المعتمد (شهر {openedMonthFolder})
+                          </h3>
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            {monthReports.map((report) => {
+                              const gradeLabel = getGradeLabelAr(report.grade);
+                              const students = buildStudentPerformance(report.grade);
+
+                              return (
+                                <div
+                                  key={report.id}
+                                  className="bg-white rounded-2xl p-5 border border-[#DCE7F3] shadow-sm hover:shadow-md transition flex flex-col justify-between"
+                                >
+                                  <div>
+                                    <div className="flex items-center justify-between flex-wrap gap-1.5 mb-3">
+                                      <span className="text-xs font-black text-[#1F5AAA]">
+                                        شهر {report.month} {report.year}
+                                      </span>
+                                      <span className="text-xs font-bold text-emerald-700">
+                                        مؤرشف ومعتمد
+                                      </span>
+                                    </div>
+
+                                    <h4 className="font-black text-[#1A3A5F] text-sm mb-1">
+                                      تقرير إنجاز وتقويم الطلاب
+                                    </h4>
+                                    <p className="text-xs text-slate-600 mb-3 font-semibold">
+                                      {gradeLabel} • {schoolName}
+                                    </p>
+
+                                    <div className="grid grid-cols-3 gap-2 bg-[#F8FAFC] p-2.5 rounded-xl border border-gray-200 text-center mb-4">
+                                      <div>
+                                        <span className="text-[11px] text-gray-500 block">الطلاب</span>
+                                        <span className="font-bold text-xs text-gray-800 tabular-nums">
+                                          {report.studentsCount}
+                                        </span>
+                                      </div>
+                                      <div>
+                                        <span className="text-[11px] text-gray-500 block">التسليمات</span>
+                                        <span className="font-bold text-xs text-indigo-700 tabular-nums">
+                                          {report.submissionsCount}
+                                        </span>
+                                      </div>
+                                      <div>
+                                        <span className="text-[11px] text-gray-500 block">متوسط الأداء</span>
+                                        <span className="font-bold text-xs text-emerald-700 tabular-nums">
+                                          {report.avgScore}%
+                                        </span>
+                                      </div>
+                                    </div>
+                                  </div>
+
+                                  <div className="flex items-center gap-2 pt-3 border-t border-slate-200">
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        onOpenPdfModal({
+                                          reportTitle: `كشف تقويم وإنجاز الطلاب الشهري (شهر ${report.month})`,
+                                          periodLabel: `شهر ${report.month} ${report.year}`,
+                                          isAnnual: false,
+                                          gradeLabel,
+                                          students,
+                                        });
+                                      }}
+                                      className="flex-1 py-2 px-3 rounded-xl bg-[#1F5AAA] hover:bg-[#194B91] text-white text-xs font-black transition flex items-center justify-center gap-1.5 shadow-sm cursor-pointer border border-[#194B91] whitespace-nowrap"
+                                    >
+                                      <Download className="w-3.5 h-3.5 shrink-0" />
+                                      <span>تحميل PDF A4</span>
+                                    </button>
+
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const matchedSaved = savedMonthlyReports.find(
+                                          (sr) => sr.monthName === report.month && sr.year === report.year
+                                        );
+                                        const savedActs = (matchedSaved?.teacherActivities || []).filter(
+                                          (act) => !act.grade || matchesGrade(act.grade, '', report.grade)
+                                        );
+                                        setSelectedReportDetail({
+                                          ...report,
+                                          students,
+                                          teacherActivities: savedActs,
+                                        });
+                                      }}
+                                      className="p-2 rounded-xl bg-[#EEF5FC] hover:bg-[#E0ECF9] text-[#1F5AAA] border border-[#C6DCF2] transition cursor-pointer shrink-0"
+                                      title="معاينة الطلاب"
+                                    >
+                                      <Eye className="w-4 h-4" />
+                                    </button>
+                                  </div>
+                                </div>
+                              );
+                            })}
                           </div>
                         </div>
-                      );
-                    })}
+                      )
+                    )}
                   </div>
                 );
               })()}
@@ -1074,28 +1272,53 @@ export const PrincipalArchiveView: React.FC<PrincipalArchiveViewProps> = ({
       {/* VIEW 1C: SCHOOL ACTIVITIES ARCHIVE (Computer Folders + Collapsed Day Accordions) */}
       {view === 'archive_school_activities' && (
         <div className="space-y-4">
-          {/* Category Filter Buttons */}
-          <div className="flex flex-wrap items-center gap-1.5">
-            {(['الكل', 'تقرير', 'نشاط', 'فعالية'] as const).map((cat) => (
-              <button
-                key={`pri-arc-sa-cat-${cat}`}
-                type="button"
-                onClick={() => setSelectedSchoolActivityCat(cat)}
-                className={`px-3.5 py-1.5 rounded-xl text-xs font-black transition cursor-pointer border whitespace-nowrap shrink-0 ${
-                  selectedSchoolActivityCat === cat
-                    ? 'bg-[#1F5AAA] text-white border-[#194B91] shadow-2xs'
-                    : 'bg-white text-[#1A3A5F] hover:bg-[#EEF5FC] border-[#DCE7F3]'
-                }`}
-              >
-                {cat === 'الكل'
-                  ? 'الكل'
-                  : cat === 'تقرير'
-                  ? 'التقارير'
-                  : cat === 'نشاط'
-                  ? 'الأنشطة'
-                  : 'الفعاليات'}
-              </button>
-            ))}
+          {/* Category & Grade Scope Filter Buttons */}
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-1.5">
+              {(['الكل', 'تقرير', 'نشاط', 'فعالية'] as const).map((cat) => (
+                <button
+                  key={`pri-arc-sa-cat-${cat}`}
+                  type="button"
+                  onClick={() => setSelectedSchoolActivityCat(cat)}
+                  className={`px-3.5 py-1.5 rounded-xl text-xs font-black transition cursor-pointer border whitespace-nowrap shrink-0 ${
+                    selectedSchoolActivityCat === cat
+                      ? 'bg-[#1F5AAA] text-white border-[#194B91] shadow-2xs'
+                      : 'bg-white text-[#1A3A5F] hover:bg-[#EEF5FC] border-[#DCE7F3]'
+                  }`}
+                >
+                  {cat === 'الكل'
+                    ? 'الكل'
+                    : cat === 'تقرير'
+                    ? 'التقارير'
+                    : cat === 'نشاط'
+                    ? 'الأنشطة'
+                    : 'الفعاليات'}
+                </button>
+              ))}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-1.5">
+              {(
+                [
+                  { id: 'الكل', label: `${selectedGradeLabel} + العام` },
+                  { id: 'الصف_فقط', label: `${selectedGradeLabel} فقط` },
+                  { id: 'عام', label: 'عام لجميع الصفوف' },
+                ] as const
+              ).map((sc) => (
+                <button
+                  key={`pri-arc-sa-scope-${sc.id}`}
+                  type="button"
+                  onClick={() => setSelectedSchoolActivityScope(sc.id)}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-black transition cursor-pointer border whitespace-nowrap shrink-0 ${
+                    selectedSchoolActivityScope === sc.id
+                      ? 'bg-amber-600 text-white border-amber-700 shadow-2xs'
+                      : 'bg-white text-[#1A3A5F] hover:bg-[#EEF5FC] border-[#DCE7F3]'
+                  }`}
+                >
+                  {sc.label}
+                </button>
+              ))}
+            </div>
           </div>
 
           {!openedMonthFolder ? (
@@ -1105,7 +1328,7 @@ export const PrincipalArchiveView: React.FC<PrincipalArchiveViewProps> = ({
                 filteredSchoolActivities.filter((act) => act.monthName === monthName).length
               }
               unitLabel="سجل"
-              headerTitle="مجلدات الأنشطة والتقارير والفعاليات المدرسية — اضغط لفتح الشهر:"
+              headerTitle={`مجلدات أرشفة الأنشطة المدرسية (${selectedGradeLabel}) — اضغط لفتح الشهر:`}
               onSelectMonth={(monthName) => {
                 setOpenedMonthFolder(monthName);
                 setExpandedDayKeys({});
@@ -1304,134 +1527,7 @@ export const PrincipalArchiveView: React.FC<PrincipalArchiveViewProps> = ({
         </div>
       )}
 
-      {/* VIEW 2: CUMULATIVE ANNUAL REPORT ARCHIVE (Independent Grade) */}
-      {view === 'archive_cumulative' && (
-        <div className="space-y-6">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-center">
-            <div className="bg-white p-4 rounded-2xl border border-[#DCE7F3] shadow-sm">
-              <span className="text-xs text-slate-600 font-bold block mb-1">الطلاب المسجلون</span>
-              <span className="text-xl font-black text-[#1A3A5F] tabular-nums">
-                {cumulativeStudents.length} طالب
-              </span>
-            </div>
 
-            <div className="bg-white p-4 rounded-2xl border border-[#DCE7F3] shadow-sm">
-              <span className="text-xs text-slate-600 font-bold block mb-1">إجمالي التسليمات</span>
-              <span className="text-xl font-black text-[#1F5AAA] tabular-nums">
-                {cumulativeTotalSubs} تسليم
-              </span>
-            </div>
-
-            <div className="bg-white p-4 rounded-2xl border border-[#DCE7F3] shadow-sm">
-              <span className="text-xs text-slate-600 font-bold block mb-1">متوسط الأداء التراكمي</span>
-              <span className="text-xl font-black text-emerald-700 tabular-nums">
-                {cumulativeAvg}%
-              </span>
-            </div>
-
-            <div className="bg-white p-4 rounded-2xl border border-[#DCE7F3] shadow-sm">
-              <span className="text-xs text-slate-600 font-bold block mb-1">نسبة النجاح العامة</span>
-              <span className="text-xl font-black text-amber-700 tabular-nums">
-                {cumulativePassRate}%
-              </span>
-            </div>
-          </div>
-
-          <div className="bg-white rounded-2xl p-6 shadow-sm border border-[#DCE7F3] flex items-center justify-between flex-wrap gap-4">
-            <div>
-              <h3 className="font-black text-base text-[#1A3A5F] mb-1">
-                التقرير التراكمي العام للعام الدراسي {selectedYear} - {selectedYear + 1}م ({selectedGradeLabel})
-              </h3>
-              <p className="text-xs text-slate-600 font-semibold">
-                بيانات كل صف دراسي مستقلة ومنفصلة بالكامل.
-              </p>
-            </div>
-
-            <button
-              type="button"
-              onClick={() => {
-                onOpenPdfModal({
-                  reportTitle: 'التقرير التراكمي العام للعام الدراسي',
-                  periodLabel: 'التقرير التراكمي السنوي',
-                  isAnnual: true,
-                  gradeLabel: `${selectedGradeLabel} الأساسي`,
-                  students: cumulativeStudents,
-                });
-              }}
-              className="w-full sm:w-auto justify-center text-center py-2.5 px-5 sm:px-6 rounded-xl bg-[#1F5AAA] hover:bg-[#194B91] text-white text-xs sm:text-sm font-black shadow-sm transition flex items-center gap-2 cursor-pointer border border-[#194B91] whitespace-nowrap"
-            >
-              <Download className="w-4 h-4 shrink-0" />
-              <span>تحميل التقرير التراكمي السنوي PDF A4</span>
-            </button>
-          </div>
-
-          <div className="bg-white rounded-2xl border border-[#DCE7F3] shadow-sm overflow-hidden">
-            <div className="p-4 bg-[#F4F8FC] border-b border-[#DCE7F3] flex items-center justify-between">
-              <h4 className="font-black text-xs sm:text-sm text-[#1A3A5F]">
-                كشف إنجاز وتقييم الطلاب في الأرشيف التراكمي — {selectedGradeLabel} ({cumulativeStudents.length} طالب)
-              </h4>
-              <span className="text-xs text-slate-600 font-bold">أسماء الطلاب</span>
-            </div>
-
-            <div className="overflow-x-auto">
-              <table className="w-full text-right text-xs">
-                <thead>
-                  <tr className="bg-[#1F5AAA] text-white">
-                    <th className="py-2.5 px-3 text-center w-10">#</th>
-                    <th className="py-2.5 px-4 font-bold">اسم الطالب</th>
-                    <th className="py-2.5 px-3 text-center">الصف</th>
-                    <th className="py-2.5 px-3 text-center">التسليمات</th>
-                    <th className="py-2.5 px-3 text-center">المعدل التراكمي %</th>
-                    <th className="py-2.5 px-3 text-center">التقدير العام</th>
-                    <th className="py-2.5 px-3 text-center">الحالة</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-200 font-medium">
-                  {cumulativeStudents.length === 0 ? (
-                    <tr>
-                      <td colSpan={7} className="py-8 text-center text-slate-500 font-bold">
-                        لا يوجد طلاب في هذا الصف
-                      </td>
-                    </tr>
-                  ) : (
-                    cumulativeStudents.map((st, idx) => (
-                      <tr key={idx} className={idx % 2 === 0 ? 'bg-white' : 'bg-[#F8FAFD]'}>
-                        <td className="py-2 px-3 text-center font-bold text-slate-600 tabular-nums">
-                          {idx + 1}
-                        </td>
-                        <td className="py-2 px-4 font-bold text-[#1A3A5F]">{st.studentName}</td>
-                        <td className="py-2 px-3 text-center font-bold text-[#1F5AAA]">
-                          الصف {st.grade || selectedGrade}
-                        </td>
-                        <td className="py-2 px-3 text-center font-mono font-bold text-[#1A3A5F] tabular-nums">
-                          {st.submissionsCount}
-                        </td>
-                        <td className="py-2 px-3 text-center font-black text-emerald-700 tabular-nums">
-                          {st.gpa}%
-                        </td>
-                        <td className="py-2 px-3 text-center font-bold text-[#1F5AAA] whitespace-nowrap">
-                          {st.gpa >= 90
-                            ? 'متميز (أ)'
-                            : st.gpa >= 80
-                            ? 'جيد جداً (ب)'
-                            : st.gpa >= 65
-                            ? 'جيد (ج)'
-                            : st.gpa >= 50
-                            ? 'مقبول (د)'
-                            : 'يحتاج متابعة'}
-                        </td>
-                        <td className="py-2 px-3 text-center text-slate-600 font-semibold text-[11px]">
-                          {st.status}
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* VIEW 3: CIRCULARS AND NOTES ARCHIVE (Computer Folders + Collapsed Day Accordions) */}
       {view === 'archive_circulars' && (
@@ -1533,13 +1629,18 @@ export const PrincipalArchiveView: React.FC<PrincipalArchiveViewProps> = ({
                                       >
                                         <div>
                                           <div className="flex items-center justify-between flex-wrap gap-1.5 mb-2 text-[11px]">
-                                            <span className="font-bold text-[#1F5AAA]">
-                                              {anc.target === 'all'
-                                                ? 'موجه للجميع'
-                                                : anc.target === 'teachers'
-                                                ? 'للمعلمين فقط'
-                                                : 'للطلاب فقط'}
-                                            </span>
+                                            <div className="flex flex-wrap items-center gap-2">
+                                              <span className="font-bold text-[#1F5AAA]">
+                                                {anc.target === 'all'
+                                                  ? 'موجه للجميع'
+                                                  : anc.target === 'teachers'
+                                                  ? 'للمعلمين فقط'
+                                                  : 'للطلاب فقط'}
+                                              </span>
+                                              <span className="font-black text-[#1A3A5F] bg-[#EEF5FC] border border-[#C6DCF2] px-2 py-0.5 rounded-lg">
+                                                {formatAnnouncementTargetGradesAr(anc.targetGrades)}
+                                              </span>
+                                            </div>
                                             <span
                                               className={`font-black ${
                                                 anc.priority === 'عاجل'

@@ -50,13 +50,18 @@ import {
   SchoolActivityArchiveItem,
   SupervisorActivity,
   getSchoolActivityTimestamp,
-  isSchoolActivityArchivedForWeek,
+  getSchoolActivityDayKey,
+  isSchoolActivityArchivedForDay,
   isQuestionArchivedForStudentWeek,
   isQuestionFromPreviousDayForStudent,
   formatDayKeyFromTimestamp,
+  formatArabicDayLabel,
   getHomeworkArchiveCutoffInfo,
+  doesAnnouncementMatchGrade,
+  formatAnnouncementTargetGradesAr,
   TeacherRecommendation,
   ClassSchedule,
+  normalizeGradeCode,
 } from '../services/appData';
 import { UnifiedSidebar, StudentArchiveSection } from '../components/UnifiedSidebar';
 import { StudentArchiveModal } from '../components/StudentArchiveModal';
@@ -65,6 +70,7 @@ import { ScheduleGridView } from '../components/ScheduleGridView';
 import { SchoolBoardView } from '../components/SchoolBoardView';
 import {
   StudentSubjectGradeTables,
+  canonicalSubjectName,
   getAcademicMonthFromTimestamp,
   resolveRecordTimestamp,
 } from '../components/StudentSubjectGradeTables';
@@ -219,7 +225,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
   );
   const [nowTick, setNowTick] = useState<number>(() => Date.now());
   const [announcements, setAnnouncements] = useState<Announcement[]>(() =>
-    session.schoolId ? appDataService.getAnnouncements('student', session.schoolId) : []
+    session.schoolId ? appDataService.getAnnouncements('student', session.schoolId, studentGrade) : []
   );
   const [homeworkCount, setHomeworkCount] = useState<number>(0);
   const [announcementCount, setAnnouncementCount] = useState<number>(0);
@@ -523,11 +529,11 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
     );
   }, [archivedHomeworkBatches, rawClassQuestions, closedQuestionIds, nowTick, session.schoolId, session.code, studentGrade]);
 
-  // Keep Firestore Thursday weekly School Activities Archive synced and merged with past-week approved activities
+  // Keep Firestore daily School Activities Archive synced before the start of the next calendar day
   useEffect(() => {
     if (!currentUser?.schoolId || approvedSchoolActivities.length === 0) return;
     appDataService
-      .syncThursdaySchoolActivitiesArchive(currentUser.schoolId, approvedSchoolActivities, nowTick)
+      .syncDailySchoolActivitiesArchive(currentUser.schoolId, approvedSchoolActivities, nowTick)
       .catch(() => {});
   }, [currentUser?.schoolId, approvedSchoolActivities, nowTick]);
 
@@ -536,11 +542,16 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
     archivedSchoolActivityBatches.forEach((b) => byId.set(b.id, b));
 
     approvedSchoolActivities.forEach((act) => {
-      if (!isSchoolActivityArchivedForWeek(act, nowTick)) return;
-      const ts = getSchoolActivityTimestamp(act);
-      if (!ts) return;
-      const info = getHomeworkArchiveCutoffInfo(ts);
-      const batchId = `sa_${session.schoolId}_${info.thursdayKey}`;
+      if (!isSchoolActivityArchivedForDay(act, nowTick)) return;
+      const dayKey = getSchoolActivityDayKey(act);
+      const ts = getSchoolActivityTimestamp(act) || (dayKey ? Date.parse(`${dayKey}T09:00:00`) : 0);
+      if (!dayKey || !ts) return;
+
+      const [yrStr, moStr, dyStr] = dayKey.split('-');
+      const dayDate = new Date(Number(yrStr), Number(moStr) - 1, Number(dyStr), 9, 0, 0, 0);
+      const monthName = getAcademicMonthFromTimestamp(dayDate.getTime());
+      const year = dayDate.getFullYear();
+      const batchId = `sa_${session.schoolId}_${dayKey}`;
       const existing = byId.get(batchId);
       const imgs = Array.isArray(act.images) ? act.images : [];
       const item: SchoolActivityArchiveItem = {
@@ -551,14 +562,14 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
         formalText: (act.formalText || act.details || '').trim(),
         targetGrade: act.targetGrade || 'الكل',
         targetClass: act.targetClass || 'الكل',
-        activityDate: act.activityDate || '',
+        activityDate: act.activityDate || dayKey,
         createdBy: act.createdBy || 'المشرف',
         approvedBy: act.approvedBy || 'مدير المدرسة',
         coverImage: imgs[0],
         imagesCount: imgs.length,
         inputType: act.inputType,
         timestamp: ts,
-        dateLabel: new Date(ts).toLocaleDateString('ar-YE', {
+        dateLabel: dayDate.toLocaleDateString('ar-YE', {
           year: 'numeric',
           month: 'short',
           day: 'numeric',
@@ -579,16 +590,16 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
           id: batchId,
           recordType: 'school_activities_archive',
           schoolId: session.schoolId || '',
-          thursdayKey: info.thursdayKey,
-          weekLabel: info.weekLabel,
-          year: info.year,
-          monthName: info.monthName,
-          archivedAt: info.thuDate.toLocaleDateString('ar-YE', {
+          thursdayKey: dayKey,
+          weekLabel: formatArabicDayLabel(dayKey, nowTick),
+          year,
+          monthName,
+          archivedAt: dayDate.toLocaleDateString('ar-YE', {
             year: 'numeric',
             month: 'long',
             day: 'numeric',
           }),
-          archivedTimestamp: info.archiveAtMs,
+          archivedTimestamp: dayDate.getTime(),
           autoArchived: true,
           activitiesCount: 1,
           activities: [item],
@@ -679,6 +690,11 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
           viewerStudentCode: session.code,
         })
       );
+      setApprovedGradeSchedules(
+        appDataService
+          .getClassSchedules(session.schoolId)
+          .filter((s) => s.isApproved === true && String(s.grade).trim() === String(studentGrade).trim())
+      );
     });
 
     // 2. Direct Firestore query: Questions strictly scoped to this school & class (unlimited, all subjects)
@@ -748,15 +764,19 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
                     title: data.title || '',
                     content: data.content || '',
                     target: data.target || 'students',
+                    targetGrades: Array.isArray(data.targetGrades) ? data.targetGrades : undefined,
                     priority: data.priority || 'عادي',
                     senderName: resolvedSender,
                     senderRoleAr: data.senderRoleAr || 'مدير المدرسة',
                     schoolId: data.schoolId || session.schoolId,
                     createdAt: data.createdAtFormatted || 'الآن',
+                    timestamp: typeof data.timestamp === 'number' ? data.timestamp : undefined,
                     readCount: 1,
                   } as Announcement;
                 })
-                .filter((a) => !isSimulationAnnouncement(a));
+                .filter(
+                  (a) => !isSimulationAnnouncement(a) && doesAnnouncementMatchGrade(a, studentGrade)
+                );
           setAnnouncements(list);
         },
         () => {}
@@ -911,7 +931,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
       }
     } catch (_) {}
 
-    // 8. Direct Firestore query: Approved Fixed Term 1 Weekly Schedule (STRICTLY isolated to studentGrade)
+    // 8. Direct Firestore query: Approved Fixed Term 1 Weekly Schedule (single-field query, no composite index needed)
     let unsubSchedules = () => {};
     try {
       if (currentUser?.schoolId) {
@@ -919,8 +939,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
         const targetGrade = String(studentGrade).trim();
         const qSched = query(
           collection(db, 'class_schedules'),
-          where('schoolId', '==', currentUser.schoolId),
-          where('isApproved', '==', true)
+          where('schoolId', '==', currentUser.schoolId)
         );
         unsubSchedules = onSnapshot(
           qSched,
@@ -939,7 +958,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
             setApprovedGradeSchedules(
               appDataService
                 .getClassSchedules(currentUser.schoolId)
-                .filter((s) => s.isApproved && String(s.grade).trim() === targetGrade)
+                .filter((s) => s.isApproved === true && String(s.grade).trim() === targetGrade)
             );
           }
         );
@@ -979,6 +998,57 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
       }
     } catch (_) {}
 
+    // 10. Direct Firestore query: Teacher Recommendations for this school & grade (all subject teachers)
+    let unsubRecommendations = () => {};
+    try {
+      if (currentUser?.schoolId) {
+        const normalizedSchool = currentUser.schoolId.trim().toLowerCase();
+        const normalizedStudentCode = (session.code || '').trim().toLowerCase();
+        const targetNormGrade = normalizeGradeCode(studentGrade);
+        const qRecs = query(
+          collection(db, 'recommendations'),
+          where('schoolId', '==', currentUser.schoolId)
+        );
+        unsubRecommendations = onSnapshot(
+          qRecs,
+          (snap) => {
+            const rawDocs = snap.docs
+              .map((d) => ({ ...d.data(), id: d.id } as TeacherRecommendation))
+              .filter((r) => (r.schoolId || '').trim().toLowerCase() === normalizedSchool)
+              .filter((r) => {
+                const rg = normalizeGradeCode(r.grade);
+                return !rg || rg === 'all' || !targetNormGrade || rg === targetNormGrade;
+              })
+              .filter((r) => {
+                const targetCode = (r.targetStudentCode || '').trim().toLowerCase();
+                const isPrivate = r.targetScope === 'specific_student' || Boolean(targetCode);
+                if (!isPrivate) return true;
+                if (!normalizedStudentCode || !targetCode) return false;
+                return targetCode === normalizedStudentCode;
+              })
+              .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+
+            if (rawDocs.length > 0) {
+              setRecommendations(rawDocs);
+            } else {
+              setRecommendations(
+                appDataService.getRecommendations(currentUser.schoolId, studentGrade, undefined, {
+                  viewerStudentCode: session.code,
+                })
+              );
+            }
+          },
+          () => {
+            setRecommendations(
+              appDataService.getRecommendations(currentUser.schoolId, studentGrade, undefined, {
+                viewerStudentCode: session.code,
+              })
+            );
+          }
+        );
+      }
+    } catch (_) {}
+
     return () => {
       unsubAppData();
       unsubQuestions();
@@ -990,6 +1060,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
       unsubSchoolActs();
       unsubSchedules();
       unsubOwnAttendance();
+      unsubRecommendations();
     };
   }, [studentGrade, studentClass, session.schoolId, session.code, session.name]);
 
@@ -2007,16 +2078,21 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
                           : 'border-[#DCE7F3]'
                       }`}
                     >
-                      <div className="flex items-center justify-between mb-2">
-                        <span
-                          className={`text-[11px] font-black px-2.5 py-0.5 rounded-full ${
-                            a.priority === 'عاجل'
-                              ? 'bg-rose-600 text-white'
-                              : 'bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2]'
-                          }`}
-                        >
-                          {a.priority}
-                        </span>
+                      <div className="flex items-center justify-between flex-wrap gap-1.5 mb-2">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span
+                            className={`text-[11px] font-black px-2.5 py-0.5 rounded-full ${
+                              a.priority === 'عاجل'
+                                ? 'bg-rose-600 text-white'
+                                : 'bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2]'
+                            }`}
+                          >
+                            {a.priority}
+                          </span>
+                          <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-[#F4F8FC] text-[#1A3A5F] border border-[#DCE7F3]">
+                            {formatAnnouncementTargetGradesAr(a.targetGrades)}
+                          </span>
+                        </div>
                         <span className="text-xs text-[#5C7085] font-bold">
                           {a.createdAt}
                         </span>
@@ -2063,14 +2139,16 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
 
           const gradeSubjectOptions = Array.from(
             new Set<string>([
-              ...subjects.map((s) => s.nameAr),
-              ...studentGrades.map((g) => g.subjectName || g.subject).filter(Boolean) as string[],
-              ...archivedGradebooks.map((a) => a.subject).filter(Boolean) as string[],
+              ...subjects.map((s) => canonicalSubjectName(s.nameAr)).filter(Boolean),
+              ...studentGrades.map((g) => canonicalSubjectName(g.subjectName || g.subject)).filter(Boolean),
+              ...archivedGradebooks.map((a) => canonicalSubjectName(a.subject)).filter(Boolean),
             ])
           );
 
           const subjectSummaries = gradeSubjectOptions.map((subjName) => {
-            const subjGrades = activeGradesList.filter((g) => (g.subjectName || g.subject) === subjName);
+            const subjGrades = activeGradesList.filter(
+              (g) => canonicalSubjectName(g.subjectName || g.subject) === subjName
+            );
             const earned = subjGrades.reduce((s, g) => s + (Number(g.score ?? g.obtained) || 0), 0);
             const max = subjGrades.reduce((s, g) => s + (Number(g.maxScore || g.total) || 5), 0);
             return {
@@ -2227,6 +2305,9 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
                     subjectOptions={gradeSubjectOptions}
                     selectedSubject={selectedGradeSubject}
                     monthLabel={selectedArchive.month}
+                    showAllSubjects={true}
+                    archivedGradebooks={archivedGradebooks.filter((a) => a.month === selectedArchive.month)}
+                    studentCode={session.code}
                     emptyTitle={`لا توجد تفاصيل تسليمات منفصلة في أرشيف شهر (${selectedArchive.month})`}
                     emptySubtitle="يظهر ملخص الدرجات المعتمد أدناه."
                   />
@@ -2316,25 +2397,64 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
         })()}
 
         {/* TAB 5: TEACHER RECOMMENDATIONS (حذف الصندوق أسفل بوابة الطالب وعمل حقلين: التوصيات العامة والخاصة) */}
-        {navTab === 'recommendations' && (
+        {navTab === 'recommendations' && (() => {
+          const normalizedSchool = (session.schoolId || '').trim().toLowerCase();
+          const targetNormGrade = normalizeGradeCode(studentGrade);
+          const subjectTeacherMap = new Map<string, string>();
+
+          authService.getRegisteredCodes().forEach((c) => {
+            if (
+              c.role === 'teacher' &&
+              (c.schoolId || '').trim().toLowerCase() === normalizedSchool
+            ) {
+              const tGrade = normalizeGradeCode(c.grade);
+              if (!tGrade || tGrade === 'all' || !targetNormGrade || tGrade === targetNormGrade) {
+                const subj = canonicalSubjectName(c.subject);
+                const tName = (c.assignedToName || '').trim();
+                if (subj && tName && !subjectTeacherMap.has(subj)) {
+                  subjectTeacherMap.set(subj, tName);
+                }
+              }
+            }
+          });
+
+          recommendations.forEach((r) => {
+            const subj = canonicalSubjectName(r.subject);
+            const tName = (r.teacherName || '').trim();
+            if (subj && tName && !subjectTeacherMap.has(subj)) {
+              subjectTeacherMap.set(subj, tName);
+            }
+          });
+
+          const recSubjectsList = Array.from(
+            new Set<string>([
+              ...subjects.map((s) => canonicalSubjectName(s.nameAr)).filter(Boolean),
+              ...recommendations.map((r) => canonicalSubjectName(r.subject)).filter(Boolean),
+            ])
+          );
+
+          return (
           <div className="space-y-4">
-            {/* Subject Filters */}
+            {/* Subject & Teacher Filters */}
             <div className="bg-white p-3 rounded-2xl border border-[#DCE7F3] shadow-xs">
               <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
-                <span className="text-xs font-black text-[#1A3A5F] pl-2 shrink-0">المادة:</span>
-                {['الكل', ...subjects.map((s) => s.nameAr)].map((subjName, subjIdx) => (
-                  <button
-                    key={`rec-subj-${subjName}-${subjIdx}`}
-                    onClick={() => setSelectedRecSubject(subjName)}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-black transition shrink-0 cursor-pointer ${
-                      selectedRecSubject === subjName
-                        ? 'bg-[#1F5AAA] text-white border border-[#194B91] shadow-xs'
-                        : 'bg-[#F4F8FC] text-[#1A3A5F] hover:bg-[#EEF5FC] border border-[#DCE7F3]'
-                    }`}
-                  >
-                    {subjName}
-                  </button>
-                ))}
+                <span className="text-xs font-black text-[#1A3A5F] pl-2 shrink-0">المادة ومعلم المادة:</span>
+                {['الكل', ...recSubjectsList].map((subjName, subjIdx) => {
+                  const teacherName = subjName !== 'الكل' ? subjectTeacherMap.get(subjName) : undefined;
+                  return (
+                    <button
+                      key={`rec-subj-${subjName}-${subjIdx}`}
+                      onClick={() => setSelectedRecSubject(subjName)}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-black transition shrink-0 cursor-pointer ${
+                        selectedRecSubject === subjName
+                          ? 'bg-[#1F5AAA] text-white border border-[#194B91] shadow-xs'
+                          : 'bg-[#F4F8FC] text-[#1A3A5F] hover:bg-[#EEF5FC] border border-[#DCE7F3]'
+                      }`}
+                    >
+                      {teacherName ? `${subjName} (${teacherName})` : subjName}
+                    </button>
+                  );
+                })}
               </div>
             </div>
 
@@ -2342,7 +2462,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
             {(() => {
               const filtered = recommendations.filter((r) => {
                 if (selectedRecSubject === 'الكل') return true;
-                return r.subject === selectedRecSubject;
+                return canonicalSubjectName(r.subject) === canonicalSubjectName(selectedRecSubject);
               });
 
               const privateRecs = filtered.filter(
@@ -2352,7 +2472,14 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
                 (rec) => !(rec.targetScope === 'specific_student' || Boolean(rec.targetStudentCode))
               );
 
-              const renderRecCard = (rec: TeacherRecommendation, recIdx: number, isPrivate: boolean) => (
+              const renderRecCard = (rec: TeacherRecommendation, recIdx: number, isPrivate: boolean) => {
+                const canonSubj = canonicalSubjectName(rec.subject) || rec.subject || 'المادة';
+                const resolvedTeacher =
+                  (rec.teacherName || '').trim() ||
+                  subjectTeacherMap.get(canonSubj) ||
+                  'معلم المادة';
+
+                return (
                 <div
                   key={rec.id ? `rec-${rec.id}-${recIdx}` : `rec-idx-${recIdx}`}
                   className={`p-4 sm:p-5 rounded-2xl shadow-2xs hover:shadow-xs transition text-right bg-white ${
@@ -2368,7 +2495,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
                         </span>
                       )}
                       <span className="px-2.5 py-0.5 rounded-xl text-[11px] font-black bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2]">
-                        مادة {rec.subject}
+                        مادة {canonSubj}
                       </span>
                       <span className="px-2.5 py-0.5 rounded-xl text-[11px] font-black bg-emerald-100 text-emerald-900 border border-emerald-300">
                         {rec.category || 'توجيه تربوي'}
@@ -2393,14 +2520,15 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
 
                   <div className="mt-3 pt-2.5 border-t border-[#DCE7F3] flex items-center justify-between text-[11px] text-[#5C7085]">
                     <span className="font-bold text-[#1A3A5F]">
-                      بواسطة المعلم: <strong className="text-[#1F5AAA]">أ. {rec.teacherName}</strong>
+                      بواسطة المعلم: <strong className="text-[#1F5AAA]">أ. {resolvedTeacher}</strong> ({canonSubj})
                     </span>
                     <span className="font-bold">
                       {rec.grade === 'all' ? 'جميع الصفوف' : `الصف ${rec.grade}`}
                     </span>
                   </div>
                 </div>
-              );
+                );
+              };
 
               return (
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
@@ -2465,7 +2593,8 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
               );
             })()}
           </div>
-        )}
+          );
+        })()}
 
         {/* TAB: STUDENT FIXED TERM 1 SCHEDULE (Strictly isolated to studentGrade) */}
         {navTab === 'schedule' && (
@@ -2508,6 +2637,7 @@ export const StudentDashboard: React.FC<StudentDashboardProps> = ({ session }) =
                   >
                     <ScheduleGridView
                       entries={sch.entries}
+                      scheduleImageUrl={sch.scheduleImageUrl}
                       title={`${sch.gradeLabel} — فصل ${sch.classNumber}`}
                       subtitle={`الترم ${sch.term} • معتمد من مدير المدرسة: ${sch.approvedBy || 'الإدارة المدرسية'}`}
                     />

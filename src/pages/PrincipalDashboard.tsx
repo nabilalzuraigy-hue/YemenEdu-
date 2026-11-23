@@ -18,6 +18,7 @@ import {
   Announcement,
   AppNotification,
   AttendanceRecord,
+  ClassSchedule,
   HomeworkSubmission,
   Question,
   SupervisorActivity,
@@ -36,13 +37,17 @@ import {
   isSimulationAnnouncement,
   cleanPersonName,
 } from '../utils/schoolDisplay';
+import {
+  formatAnnouncementTargetGradesAr,
+  normalizeGradeCode,
+} from '../services/appData';
+import { authService } from '../services/authService';
 
 type PrincipalViewType =
   | 'dashboard'
   | 'archive_monthly'
   | 'archive_teacher_activities'
   | 'archive_school_activities'
-  | 'archive_cumulative'
   | 'archive_circulars';
 
 interface PrincipalDashboardProps {
@@ -85,6 +90,8 @@ export const PrincipalDashboard: React.FC<PrincipalDashboardProps> = ({ session 
   const [newTitle, setNewTitle] = useState('');
   const [newContent, setNewContent] = useState('');
   const [newTarget, setNewTarget] = useState<'all' | 'teachers' | 'students'>('all');
+  const [selectedTargetGrades, setSelectedTargetGrades] = useState<string[]>([]); // empty = جميع الصفوف
+  const [showAll12Grades, setShowAll12Grades] = useState(false);
   const [newPriority, setNewPriority] = useState<'عاجل' | 'هام' | 'عادي'>('عادي');
   const [isPublishing, setIsPublishing] = useState(false);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
@@ -130,10 +137,12 @@ export const PrincipalDashboard: React.FC<PrincipalDashboardProps> = ({ session 
                   title: data.title || '',
                   content: data.content || '',
                   target: data.target || 'all',
+                  targetGrades: Array.isArray(data.targetGrades) ? data.targetGrades : undefined,
                   priority: data.priority || 'عادي',
                   senderName,
                   senderRoleAr: data.senderRoleAr || 'مدير المدرسة',
                   schoolId: data.schoolId || session.schoolId,
+                  timestamp: typeof data.timestamp === 'number' ? data.timestamp : undefined,
                   createdAt: data.createdAtFormatted || 'الآن',
                   readCount: 1,
                 } as Announcement;
@@ -231,19 +240,24 @@ export const PrincipalDashboard: React.FC<PrincipalDashboardProps> = ({ session 
       );
     } catch (_) {}
 
-    // 4. Live pending count for البريد (supervisor_activities + attendance_records)
+    // 4. Live pending count for البريد (supervisor_activities + attendance_records + class_schedules)
     const normalizedSchool = currentUser.schoolId.trim().toLowerCase();
     let actPending = 0;
     let attPending = 0;
+    let schedPending = 0;
     const syncPendingCounts = () => {
-      setPendingInboxCount(actPending + attPending);
+      setPendingInboxCount(actPending + attPending + schedPending);
     };
 
     const computeLocalCounts = () => {
       const localActs = appDataService.getSupervisorActivities(currentUser.schoolId);
       const localAtts = appDataService.getAttendanceRecords(currentUser.schoolId);
+      const localScheds = appDataService.getClassSchedules(currentUser.schoolId);
       actPending = localActs.filter((a) => !a.approvalStatus || a.approvalStatus === 'pending').length;
       attPending = localAtts.filter((r) => !r.approvalStatus || r.approvalStatus === 'pending').length;
+      schedPending = localScheds.filter(
+        (s) => s.hasPendingUpdate || (!s.isApproved && s.approvalStatus !== 'rejected')
+      ).length;
       syncPendingCounts();
     };
     computeLocalCounts();
@@ -251,6 +265,7 @@ export const PrincipalDashboard: React.FC<PrincipalDashboardProps> = ({ session 
 
     let unsubInboxAct = () => {};
     let unsubInboxAtt = () => {};
+    let unsubInboxSched = () => {};
     try {
       unsubInboxAct = onSnapshot(
         query(collection(db, 'supervisor_activities'), where('schoolId', '==', currentUser.schoolId)),
@@ -265,7 +280,7 @@ export const PrincipalDashboard: React.FC<PrincipalDashboardProps> = ({ session 
           const approvedActs = allActs.filter((a) => a.approvalStatus === 'approved');
           if (approvedActs.length > 0) {
             appDataService
-              .syncThursdaySchoolActivitiesArchive(currentUser.schoolId, approvedActs, Date.now())
+              .syncDailySchoolActivitiesArchive(currentUser.schoolId, approvedActs, Date.now())
               .catch(() => {});
           }
         },
@@ -283,6 +298,23 @@ export const PrincipalDashboard: React.FC<PrincipalDashboardProps> = ({ session 
               (r) =>
                 (r.schoolId || '').trim().toLowerCase() === normalizedSchool &&
                 (!r.approvalStatus || r.approvalStatus === 'pending')
+            ).length;
+          syncPendingCounts();
+        },
+        () => {}
+      );
+    } catch {}
+
+    try {
+      unsubInboxSched = onSnapshot(
+        query(collection(db, 'class_schedules'), where('schoolId', '==', currentUser.schoolId)),
+        (snap) => {
+          schedPending = snap.docs
+            .map((d) => d.data() as ClassSchedule)
+            .filter(
+              (s) =>
+                (s.schoolId || '').trim().toLowerCase() === normalizedSchool &&
+                (s.hasPendingUpdate || (!s.isApproved && s.approvalStatus !== 'rejected'))
             ).length;
           syncPendingCounts();
         },
@@ -335,6 +367,7 @@ export const PrincipalDashboard: React.FC<PrincipalDashboardProps> = ({ session 
       unsubLocalInbox();
       unsubInboxAct();
       unsubInboxAtt();
+      unsubInboxSched();
       unsubLocalNotifs();
       unsubNotifs();
     };
@@ -349,12 +382,24 @@ export const PrincipalDashboard: React.FC<PrincipalDashboardProps> = ({ session 
     const trimmedContent = newContent.trim();
     if (!trimmedTitle || !trimmedContent) return;
 
-    // Check if duplicate exists locally
-    const duplicateExists = announcements.some(
-      (a) => a.title.trim() === trimmedTitle && a.content.trim() === trimmedContent
-    );
+    const gradesToSave = selectedTargetGrades.length > 0 ? selectedTargetGrades : ['all'];
+    const gradesKey = [...gradesToSave].map((g) => normalizeGradeCode(g)).sort().join(',');
+
+    // Check if duplicate exists locally for the same target audience and same grades
+    const duplicateExists = announcements.some((a) => {
+      const aGrades =
+        Array.isArray(a.targetGrades) && a.targetGrades.length > 0
+          ? [...a.targetGrades].map((g) => normalizeGradeCode(g)).sort().join(',')
+          : 'all';
+      return (
+        a.title.trim() === trimmedTitle &&
+        a.content.trim() === trimmedContent &&
+        a.target === newTarget &&
+        aGrades === gradesKey
+      );
+    });
     if (duplicateExists) {
-      setSuccessMsg('⚠️ هذا التعميم أو الملاحظة تم نشره مسبقاً بنفس العنوان والمحتوى.');
+      setSuccessMsg('⚠️ هذا التعميم أو الملاحظة تم نشره مسبقاً بنفس العنوان والمحتوى والصفوف المحددة.');
       setTimeout(() => setSuccessMsg(null), 3000);
       return;
     }
@@ -369,6 +414,7 @@ export const PrincipalDashboard: React.FC<PrincipalDashboardProps> = ({ session 
         title: trimmedTitle,
         content: trimmedContent,
         target: newTarget,
+        targetGrades: gradesToSave,
         priority: newPriority,
         senderName: publisherName,
         senderRoleAr: 'مدير المدرسة',
@@ -377,8 +423,11 @@ export const PrincipalDashboard: React.FC<PrincipalDashboardProps> = ({ session 
 
       setNewTitle('');
       setNewContent('');
-      setSuccessMsg('✅ تم نشر التعميم أو الملاحظة بنجاح وإرساله للفئة المحددة.');
-      setTimeout(() => setSuccessMsg(null), 3000);
+      setSelectedTargetGrades([]);
+      setSuccessMsg(
+        `✅ تم نشر التعميم بنجاح وإرساله إلى (${formatAnnouncementTargetGradesAr(gradesToSave)}).`
+      );
+      setTimeout(() => setSuccessMsg(null), 3500);
     } catch (err: unknown) {
       console.warn('Publish error:', err);
       setSuccessMsg('حدث خطأ أثناء النشر، يرجى المحاولة مرة أخرى.');
@@ -533,6 +582,7 @@ export const PrincipalDashboard: React.FC<PrincipalDashboardProps> = ({ session 
               schoolId={session.schoolId}
               schoolName={formatArabicSchoolName(session.schoolName, session.schoolId)}
               principalName={session.name}
+              onOpenStatsArchive={() => setSidebarView('archive_monthly')}
             />
           )}
 
@@ -608,6 +658,109 @@ export const PrincipalDashboard: React.FC<PrincipalDashboardProps> = ({ session 
                     </div>
                   </div>
 
+                  {/* Multi-Grade Targeting Selector */}
+                  {(() => {
+                    const registeredGrades = Array.from(
+                      new Set(
+                        authService
+                          .getRegisteredCodes()
+                          .filter(
+                            (c) =>
+                              (c.schoolId || '').trim().toLowerCase() ===
+                              (session.schoolId || '').trim().toLowerCase()
+                          )
+                          .map((c) => normalizeGradeCode(c.grade || (c as any).class, c.code))
+                          .filter((g) => /^\d+$/.test(g))
+                      )
+                    );
+                    const baseGrades = ['7', '8', '9'];
+                    const extraGrades = showAll12Grades
+                      ? ['1', '2', '3', '4', '5', '6', '10', '11', '12']
+                      : registeredGrades.filter((g) => !baseGrades.includes(g));
+                    const visibleGrades = Array.from(new Set([...baseGrades, ...extraGrades])).sort(
+                      (a, b) => Number(a) - Number(b)
+                    );
+                    const gradeLabelMap: Record<string, string> = {
+                      '1': 'الصف الأول',
+                      '2': 'الصف الثاني',
+                      '3': 'الصف الثالث',
+                      '4': 'الصف الرابع',
+                      '5': 'الصف الخامس',
+                      '6': 'الصف السادس',
+                      '7': 'الصف السابع',
+                      '8': 'الصف الثامن',
+                      '9': 'الصف التاسع',
+                      '10': 'الصف العاشر',
+                      '11': 'الصف الحادي عشر',
+                      '12': 'الصف الثاني عشر',
+                    };
+
+                    const toggleGrade = (gId: string) => {
+                      setSelectedTargetGrades((prev) =>
+                        prev.includes(gId) ? prev.filter((x) => x !== gId) : [...prev, gId]
+                      );
+                    };
+
+                    return (
+                      <div className="rounded-xl bg-[#F4F8FC] border border-[#DCE7F3] p-3 space-y-2">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <label className="text-xs font-black text-[#1A3A5F]">
+                            تحديد الصف أو الصفوف المراد إرسال التعميم لها:
+                          </label>
+                          <button
+                            type="button"
+                            onClick={() => setShowAll12Grades((p) => !p)}
+                            className="text-[11px] font-bold text-[#1F5AAA] hover:underline cursor-pointer"
+                          >
+                            {showAll12Grades ? 'عرض الصفوف الأساسية (7 - 9)' : 'عرض كافة الصفوف (1 - 12)'}
+                          </button>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => setSelectedTargetGrades([])}
+                            className={`px-3 py-1.5 rounded-xl text-xs font-black transition cursor-pointer border ${
+                              selectedTargetGrades.length === 0
+                                ? 'bg-[#1F5AAA] text-white border-[#194B91] shadow-2xs'
+                                : 'bg-white text-[#1A3A5F] border-[#DCE7F3] hover:bg-[#EEF5FC]'
+                            }`}
+                          >
+                            جميع الصفوف
+                          </button>
+
+                          {visibleGrades.map((gId) => {
+                            const isChecked = selectedTargetGrades.includes(gId);
+                            return (
+                              <button
+                                key={`ann-grade-${gId}`}
+                                type="button"
+                                onClick={() => toggleGrade(gId)}
+                                className={`px-3 py-1.5 rounded-xl text-xs font-black transition cursor-pointer border ${
+                                  isChecked
+                                    ? 'bg-emerald-600 text-white border-emerald-700 shadow-2xs'
+                                    : 'bg-white text-[#1A3A5F] border-[#DCE7F3] hover:bg-[#EEF5FC]'
+                                }`}
+                              >
+                                {isChecked ? '✓ ' : ''}
+                                {gradeLabelMap[gId] || `الصف ${gId}`}
+                              </button>
+                            );
+                          })}
+                        </div>
+
+                        <p className="text-[11px] font-bold text-[#5C7085]">
+                          سيصل التعميم إلى:{' '}
+                          <span className="text-[#1F5AAA]">
+                            {formatAnnouncementTargetGradesAr(
+                              selectedTargetGrades.length > 0 ? selectedTargetGrades : ['all']
+                            )}
+                          </span>
+                        </p>
+                      </div>
+                    );
+                  })()}
+
                   <div>
                     <label className="block text-xs font-bold text-[#1A3A5F] mb-1">نص التعميم أو الملاحظة:</label>
                     <textarea
@@ -652,13 +805,18 @@ export const PrincipalDashboard: React.FC<PrincipalDashboardProps> = ({ session 
                         >
                           <div>
                             <div className="flex items-center justify-between flex-wrap gap-1.5 mb-2">
-                              <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2]">
-                                {anc.target === 'all'
-                                  ? 'موجه للجميع'
-                                  : anc.target === 'teachers'
-                                  ? 'للمعلمين فقط'
-                                  : 'للطلاب فقط'}
-                              </span>
+                              <div className="flex items-center flex-wrap gap-1.5">
+                                <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2]">
+                                  {anc.target === 'all'
+                                    ? 'موجه للجميع'
+                                    : anc.target === 'teachers'
+                                    ? 'للمعلمين فقط'
+                                    : 'للطلاب فقط'}
+                                </span>
+                                <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200">
+                                  {formatAnnouncementTargetGradesAr(anc.targetGrades)}
+                                </span>
+                              </div>
                               <span
                                 className={`text-[11px] font-bold px-2.5 py-0.5 rounded-full border ${
                                   anc.priority === 'عاجل'

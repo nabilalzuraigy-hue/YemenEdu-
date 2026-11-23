@@ -45,7 +45,6 @@ export type UnifiedSidebarView =
   | 'archive_monthly'
   | 'archive_teacher_activities'
   | 'archive_school_activities'
-  | 'archive_cumulative'
   | 'archive_circulars'
   | 'archive_questions'
   | 'archive_grades'
@@ -369,7 +368,7 @@ export const UnifiedSidebar: React.FC<UnifiedSidebarProps> = ({
                             }`}
                           >
                             <CalendarCheck className="w-3.5 h-3.5 text-white/85 shrink-0" />
-                            <span className="truncate">أرشيف التقرير الشهري</span>
+                            <span className="truncate">أرشيف الإحصائيات</span>
                           </button>
 
                           <button
@@ -402,22 +401,6 @@ export const UnifiedSidebar: React.FC<UnifiedSidebarProps> = ({
                           >
                             <Trophy className="w-3.5 h-3.5 text-amber-200 shrink-0" />
                             <span className="truncate">أرشفة الأنشطة المدرسية</span>
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => {
-                              onSelectView('archive_cumulative');
-                              onClose();
-                            }}
-                            className={`w-full min-h-[40px] px-2.5 py-2 rounded-lg text-xs font-bold flex items-center gap-2 transition cursor-pointer ${
-                              activeView === 'archive_cumulative'
-                                ? 'bg-white/18 text-white'
-                                : 'text-white/90 hover:text-white hover:bg-white/10'
-                            }`}
-                          >
-                            <Award className="w-3.5 h-3.5 text-white/85 shrink-0" />
-                            <span className="truncate">أرشيف التقرير التراكمي السنوي</span>
                           </button>
 
                           <button

@@ -28,10 +28,10 @@ function extractBase64Image(rawInput: string, fallbackMime = 'image/jpeg'): { da
   };
 }
 
-function createGeminiClient(timeoutMs = 15000): GoogleGenAI {
+function createGeminiClient(timeoutMs = 45000): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    throw new Error('مفتاح Gemini غير مهيأ على الخادم في Settings > Secrets.');
+    throw new Error('خدمة المعالجة غير مفعلة حالياً على الخادم، يرجى المحاولة لاحقاً.');
   }
   return new GoogleGenAI({
     apiKey,
@@ -84,23 +84,22 @@ function formatGeminiErrorMessage(err: unknown, fallbackArabic: string): string 
   }
 
   const lower = `${raw} ${extractedMsg} ${extractedStatus} ${extractedCode}`.toLowerCase();
-  if (lower.includes('gemini_api_key') || lower.includes('مفتاح gemini')) {
-    return 'مفتاح GEMINI_API_KEY غير مضاف أو غير نشط في Settings > Secrets.';
+  if (lower.includes('غير مفعلة حالياً على الخادم') || lower.includes('api_key') || lower.includes('gemini')) {
+    if (lower.includes('api_key_invalid') || lower.includes('permission_denied') || lower.includes('403') || lower.includes('401') || lower.includes('not set') || lower.includes('غير مفعلة')) {
+      return 'تعذر الاتصال بخدمة المعالجة على الخادم حالياً، يرجى المحاولة لاحقاً.';
+    }
   }
   if (lower.includes('api_key_invalid') || lower.includes('permission_denied') || lower.includes('403') || lower.includes('401')) {
-    return 'تعذر التحقق من مفتاح Gemini API؛ يرجى مراجعة المفتاح في Settings > Secrets.';
+    return 'تعذر الاتصال بخدمة المعالجة على الخادم حالياً، يرجى المحاولة لاحقاً.';
   }
   if (lower.includes('timeout') || lower.includes('aborted') || lower.includes('etimedout') || lower.includes('504') || lower.includes('deadline_exceeded')) {
-    return 'استغرق الاتصال بخادم Gemini وقتاً أطول من المعتاد، يرجى المحاولة مرة أخرى.';
+    return 'استغرق الاتصال بالخادم وقتاً أطول من المعتاد، يرجى المحاولة مرة أخرى.';
   }
   if (lower.includes('503') || lower.includes('unavailable') || lower.includes('high demand') || lower.includes('overloaded')) {
-    return 'خادم الذكاء الاصطناعي مزدحم مؤقتاً الآن، يرجى المحاولة مرة أخرى بعد لحظات.';
+    return 'الخادم مزدحم أو معلق مؤقتاً الآن، يرجى المحاولة مرة أخرى بعد لحظات.';
   }
   if (lower.includes('429') || lower.includes('resource_exhausted') || lower.includes('quota')) {
-    return 'تم تجاوز حد الطلبات المؤقت لمفتاح Gemini API، يرجى الانتظار قليلاً ثم المحاولة.';
-  }
-  if (extractedMsg && !extractedMsg.startsWith('{')) {
-    return `${fallbackArabic}: ${extractedMsg}`;
+    return 'الخادم مزدحم مؤقتاً لكثرة الطلبات، يرجى الانتظار قليلاً ثم المحاولة مرة أخرى.';
   }
   return fallbackArabic;
 }
@@ -147,12 +146,12 @@ async function generateContentWithRetry(
 const VALID_DAYS = ['السبت', 'الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء'] as const;
 
 function normalizeArabicDay(rawDay: string): string {
-  const d = (rawDay || '').replace(/[أإآ]/g, 'ا').replace(/\s+/g, '').trim();
-  if (d.includes('سبت')) return 'السبت';
-  if (d.includes('احد')) return 'الأحد';
-  if (d.includes('اثنين') || d.includes('ثنين')) return 'الاثنين';
-  if (d.includes('ثلاثاء') || d.includes('ثلوث')) return 'الثلاثاء';
-  if (d.includes('اربعاء') || d.includes('ربوع')) return 'الأربعاء';
+  const d = (rawDay || '').replace(/[أإآ]/g, 'ا').replace(/\s+/g, '').trim().toLowerCase();
+  if (d.includes('سبت') || d.includes('saturday') || d === 'sat') return 'السبت';
+  if (d.includes('احد') || d.includes('sunday') || d === 'sun') return 'الأحد';
+  if (d.includes('اثنين') || d.includes('ثنين') || d.includes('monday') || d === 'mon') return 'الاثنين';
+  if (d.includes('ثلاثاء') || d.includes('ثلوث') || d.includes('tuesday') || d === 'tue') return 'الثلاثاء';
+  if (d.includes('اربعاء') || d.includes('ربوع') || d.includes('wednesday') || d === 'wed') return 'الأربعاء';
   return 'السبت';
 }
 
@@ -233,11 +232,11 @@ async function startServer() {
         return;
       }
 
-      const ai = createGeminiClient();
+      const ai = createGeminiClient(45000);
       const img = extractBase64Image(imageBase64, mimeType || 'image/jpeg');
 
       const response = await generateContentWithRetry(ai, {
-        model: MODEL_ID,
+        model: FALLBACK_MODEL_ID,
         contents: [
           {
             role: 'user',
@@ -249,7 +248,7 @@ async function startServer() {
                 },
               },
               {
-                text: `أنت نظام ذكي متخصص في قراءة كشوفات الحضور والغياب المدرسية الورقية في المدارس اليمنية (خط يد أو مطبوع).
+                text: `أنت نظام متخصص في قراءة كشوفات الحضور والغياب المدرسية الورقية في المدارس اليمنية (خط يد أو مطبوع).
 اقرأ صورة كشف الحضور المرفقة بعناية (${gradeLabel || ''} ${classNumber ? `شعبة ${classNumber}` : ''}).
 استخرج جميع أسماء الطلاب الظاهرة في الكشف بدقة باللغة العربية، وحدد حالة كل طالب وملاحظة العذر إن وجدت:
 - علامة صح (✓ / ✔) أو حرف (ح) أو كلمة (حاضر) -> "حاضر"
@@ -263,7 +262,7 @@ async function startServer() {
           },
         ],
         config: {
-          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,
@@ -324,11 +323,11 @@ async function startServer() {
         return;
       }
 
-      const ai = createGeminiClient();
+      const ai = createGeminiClient(45000);
       const img = extractBase64Image(imageBase64, mimeType || 'image/jpeg');
 
       const response = await generateContentWithRetry(ai, {
-        model: MODEL_ID,
+        model: FALLBACK_MODEL_ID,
         contents: [
           {
             role: 'user',
@@ -340,21 +339,22 @@ async function startServer() {
                 },
               },
               {
-                text: `أنت نظام ذكي متخصص في قراءة جداول الحصص المدرسية الأسبوعية الورقية أو المصورة (${gradeLabel || ''} ${classNumber ? `فصل ${classNumber}` : ''}).
-استخرج جدول الحصص كاملاً للأيام الدراسية من السبت إلى الأربعاء، وللحصص من 1 (الأولى) إلى 6 (السادسة).
+                text: `اقرأ صورة جدول الحصص المدرسي المرفقة بدقة (${gradeLabel || ''} ${classNumber ? `فصل ${classNumber}` : ''}).
+إذا لم تكن الصورة جدول حصص مدرسي واضح (مثل ورقة أرقام أو باركود أو مستند مختلف)، أعد مصفوفة فارغة entries: [].
+أما إذا كانت جدول حصص أسبوعي، استخرج الحصص للأيام المتوفرة (من السبت إلى الأربعاء، وإن بدأ الجدول بالأحد أو الاثنين فحوّل أول 5 أيام دراسية بالترتيب إلى: "السبت", "الأحد", "الاثنين", "الثلاثاء", "الأربعاء")، وللحصص من 1 (الأولى) إلى 6 (السادسة).
 لكل حصة استخرج:
-- day: اليوم (يجب أن يكون واحداً فقط من: "السبت", "الأحد", "الاثنين", "الثلاثاء", "الأربعاء")
-- period: رقم الحصة من 1 إلى 6 (1=الأولى, 2=الثانية, 3=الثالثة, 4=الرابعة, 5=الخامسة, 6=السادسة)
-- subject: اسم المادة الدراسية بالعربية (مثل: القرآن الكريم، التربية الإسلامية، اللغة العربية، الرياضيات، العلوم، اللغة الإنجليزية، الاجتماعيات...)
-- teacherName: اسم المعلم إن وجد في الخلية أو بجانب المادة، وإذا لم يكن مكتوباً اتركه نصاً فارغاً "".
-تجاهل صفوف الاستراحة/الفسحة أو طابور الصباح إذا لم تكن ضمن الحصص 1-6.
+- day: اليوم ("السبت", "الأحد", "الاثنين", "الثلاثاء", "الأربعاء")
+- period: رقم الحصة من 1 إلى 6
+- subject: اسم المادة بالعربية (وإن وردت بالإنجليزية ترجمها للعربية مثل: Mathematics -> الرياضيات، Science -> العلوم، English -> اللغة الإنجليزية، Social Studies -> الاجتماعيات، ICT -> الحاسوب، Art -> التربية الفنية، Physical Education -> التربية البدنية، Moral Education -> التربية الإسلامية)
+- teacherName: اسم المعلم إن وجد، وإلا "".
+تجاهل الاستراحة/الفسحة وطابور الصباح والحصة السابعة.
 أعد البيانات بصيغة JSON منظمة فقط.`,
               },
             ],
           },
         ],
         config: {
-          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,
@@ -432,7 +432,7 @@ async function startServer() {
         return;
       }
 
-      const ai = createGeminiClient();
+      const ai = createGeminiClient(45000);
       const audioPart = {
         inlineData: {
           mimeType: cleanMime,
@@ -569,7 +569,7 @@ ${transcript}
         return;
       }
 
-      const ai = createGeminiClient();
+      const ai = createGeminiClient(45000);
       const imageParts = imageList
         .filter((item) => item && typeof item.base64 === 'string' && item.base64.trim().length > 0)
         .map((item) => {
@@ -700,7 +700,7 @@ ${transcript}
               .join('\n')}`
           : '';
 
-      const ai = createGeminiClient(30000);
+      const ai = createGeminiClient(45000);
       const pageParts = (validImages as Array<{ base64: string; mimeType?: string }>).flatMap((item, idx) => {
         const img = extractBase64Image(item.base64, item.mimeType || 'image/jpeg');
         return [
@@ -863,9 +863,9 @@ ${transcript}
       const lower = raw.toLowerCase();
       let safeMessage = 'تعذر تجهيز الأسئلة حالياً، يرجى المحاولة مرة أخرى.';
       if (lower.includes('timeout') || lower.includes('aborted') || lower.includes('504') || lower.includes('deadline')) {
-        safeMessage = 'استغرق تجهيز الأسئلة وقتاً أطول من المعتاد، يرجى المحاولة مرة أخرى.';
+        safeMessage = 'استغرق الاتصال بالخادم وقتاً أطول من المعتاد، يرجى المحاولة مرة أخرى.';
       } else if (lower.includes('503') || lower.includes('unavailable') || lower.includes('overloaded') || lower.includes('429') || lower.includes('resource_exhausted')) {
-        safeMessage = 'الخدمة مزدحمة مؤقتاً الآن، يرجى المحاولة مرة أخرى بعد قليل.';
+        safeMessage = 'الخادم مزدحم أو معلق مؤقتاً الآن، يرجى المحاولة مرة أخرى بعد قليل.';
       }
       res.status(500).json({ error: safeMessage });
     }

@@ -181,6 +181,10 @@
           "type": "string",
           "description": "Target audience: all, teachers, or students"
         },
+        "targetGrades": {
+          "type": "array",
+          "description": "Optional list of target grade IDs (e.g. ['7', '8']) or ['all'] for all grades"
+        },
         "priority": {
           "type": "string",
           "description": "Priority: عاجل, هام, or عادي"
@@ -415,6 +419,8 @@
         "classNumber": { "type": "string", "description": "Class number or section" },
         "term": { "type": "string", "description": "Fixed Term 1 label" },
         "entries": { "type": "array", "description": "Schedule slots Saturday-Wednesday periods 1-6" },
+        "scheduleImageUrl": { "type": "string", "description": "Optional compressed schedule photo uploaded as-is when OCR is unavailable or attached" },
+        "pendingScheduleImageUrl": { "type": "string", "description": "Optional pending compressed schedule photo awaiting principal approval" },
         "uploadedBy": { "type": "string", "description": "Supervisor full name" },
         "supervisorCode": { "type": "string", "description": "Supervisor activation code" },
         "uploadedAt": { "type": "number", "description": "Upload timestamp ms" },
@@ -443,7 +449,7 @@
         "activityDate": { "type": "string", "description": "YYYY-MM-DD date" },
         "inputType": { "type": "string", "description": "صوت or صورة" },
         "originalText": { "type": "string", "description": "Original supervisor voice transcript or 1-line photo caption" },
-        "formalText": { "type": "string", "description": "Final formal Arabic report drafted by Gemini and reviewed by supervisor" },
+        "formalText": { "type": "string", "description": "Final formal Arabic report reviewed by supervisor" },
         "audioUrl": { "type": "string", "description": "Firebase Storage URL for supervisor voice recording (max 2 min)" },
         "createdBy": { "type": "string", "description": "Supervisor name" },
         "supervisorCode": { "type": "string", "description": "Supervisor code" },
@@ -559,7 +565,7 @@
     },
     "/monthlyReports/{reportId}": {
       "schema": "gradeRecord",
-      "description": "Collection storing archived monthly reports, weekly teacher activity archives, weekly student homework archives, and weekly school activities archives"
+      "description": "Collection storing archived monthly reports, daily statistics archives, weekly teacher activity archives, weekly student homework archives, and daily school activities archives"
     },
     "/monthlyGradebooks/{recordId}": {
       "schema": "gradeRecord",

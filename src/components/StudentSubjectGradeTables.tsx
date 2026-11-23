@@ -1,10 +1,18 @@
 import React from 'react';
-import { Award, BookOpen } from 'lucide-react';
+import { Award, BookOpen, CheckCircle2 } from 'lucide-react';
 import {
   GradeRecord,
   HomeworkSubmission,
+  MonthlyGradebookRecord,
   getQuestionTimestamp,
 } from '../services/appData';
+import { resolveSubjectItem } from '../services/authService';
+
+export function canonicalSubjectName(raw?: string): string {
+  const clean = (raw || '').trim();
+  if (!clean) return '';
+  return resolveSubjectItem(clean)?.nameAr || clean;
+}
 
 export function getAcademicMonthFromTimestamp(ts: number): string {
   if (!ts) return 'نوفمبر';
@@ -20,6 +28,8 @@ export function getAcademicMonthFromTimestamp(ts: number): string {
     3: 'أبريل',
     4: 'مايو',
     5: 'يونيو',
+    6: 'يونيو',
+    7: 'سبتمبر',
   };
   return map[m] || 'نوفمبر';
 }
@@ -77,6 +87,9 @@ interface StudentSubjectGradeTablesProps {
   subjectOptions: string[];
   selectedSubject: string;
   monthLabel: string;
+  showAllSubjects?: boolean;
+  archivedGradebooks?: MonthlyGradebookRecord[];
+  studentCode?: string;
   emptyTitle?: string;
   emptySubtitle?: string;
 }
@@ -87,13 +100,16 @@ export const StudentSubjectGradeTables: React.FC<StudentSubjectGradeTablesProps>
   subjectOptions,
   selectedSubject,
   monthLabel,
+  showAllSubjects = false,
+  archivedGradebooks = [],
+  studentCode,
   emptyTitle,
   emptySubtitle,
 }) => {
   const normalizedSubjectMap = new Map<string, { grades: GradeRecord[]; submissions: HomeworkSubmission[] }>();
 
   const ensureSubject = (name: string) => {
-    const clean = name.trim() || 'المادة الدراسية';
+    const clean = canonicalSubjectName(name) || 'المادة الدراسية';
     if (!normalizedSubjectMap.has(clean)) {
       normalizedSubjectMap.set(clean, { grades: [], submissions: [] });
     }
@@ -101,23 +117,69 @@ export const StudentSubjectGradeTables: React.FC<StudentSubjectGradeTablesProps>
   };
 
   grades.forEach((g) => {
-    const subj = (g.subjectName || g.subject || '').trim();
+    const subj = canonicalSubjectName(g.subjectName || g.subject);
     if (!subj) return;
     ensureSubject(subj).grades.push(g);
   });
 
   submissions.forEach((s) => {
-    const subj = (s.subject || '').trim();
+    const subj = canonicalSubjectName(s.subject);
     if (!subj) return;
     ensureSubject(subj).submissions.push(s);
   });
 
+  const archivedSummaryBySubject = new Map<
+    string,
+    {
+      teacherName?: string;
+      archivedAt?: string;
+      totalEarned: number;
+      totalPossible: number;
+      percentage: number;
+      submissionsCount: number;
+      rating: string;
+    }
+  >();
+
+  archivedGradebooks.forEach((arc) => {
+    const subj = canonicalSubjectName(arc.subject);
+    if (!subj) return;
+    const studentEntry = studentCode
+      ? arc.roster?.find((st) => (st.code || '').trim().toLowerCase() === studentCode.trim().toLowerCase())
+      : undefined;
+    if (studentEntry && !archivedSummaryBySubject.has(subj)) {
+      archivedSummaryBySubject.set(subj, {
+        teacherName: arc.teacherName,
+        archivedAt: arc.archivedAt,
+        totalEarned: Number(studentEntry.totalEarned || 0),
+        totalPossible: Number(studentEntry.totalPossible || 0),
+        percentage: Number(studentEntry.percentage || 0),
+        submissionsCount: Number(studentEntry.submissionsCount || 0),
+        rating: studentEntry.rating || 'معتمد',
+      });
+    }
+  });
+
+  const canonicalOptions = Array.from(
+    new Set<string>(subjectOptions.map((s) => canonicalSubjectName(s)).filter(Boolean))
+  );
+  const canonicalSelected =
+    selectedSubject === 'الكل' ? 'الكل' : canonicalSubjectName(selectedSubject) || selectedSubject;
+
   const subjectsToRender: string[] =
-    selectedSubject !== 'الكل'
-      ? [selectedSubject]
+    canonicalSelected !== 'الكل'
+      ? [canonicalSelected]
+      : showAllSubjects
+      ? Array.from(
+          new Set<string>([
+            ...canonicalOptions,
+            ...Array.from(normalizedSubjectMap.keys()),
+            ...Array.from(archivedSummaryBySubject.keys()),
+          ])
+        )
       : Array.from(
           new Set<string>([
-            ...subjectOptions.filter((s) => normalizedSubjectMap.has(s)),
+            ...canonicalOptions.filter((s) => normalizedSubjectMap.has(s)),
             ...Array.from(normalizedSubjectMap.keys()),
           ])
         );
@@ -125,6 +187,7 @@ export const StudentSubjectGradeTables: React.FC<StudentSubjectGradeTablesProps>
   const subjectTables = subjectsToRender
     .map((subjName) => {
       const bucket = normalizedSubjectMap.get(subjName) || { grades: [], submissions: [] };
+      const archivedSummary = archivedSummaryBySubject.get(subjName);
       const byDay = new Map<
         string,
         {
@@ -191,19 +254,29 @@ export const StudentSubjectGradeTables: React.FC<StudentSubjectGradeTablesProps>
           };
         });
 
-      const totalSubs = rows.reduce((s, r) => s + r.submissionsCount, 0);
-      const totalEarned = rows.reduce((s, r) => s + r.earnedScore, 0);
-      const totalMax = rows.reduce((s, r) => s + r.maxScore, 0);
+      const totalSubs =
+        rows.length > 0
+          ? rows.reduce((s, r) => s + r.submissionsCount, 0)
+          : archivedSummary?.submissionsCount || 0;
+      const totalEarned =
+        rows.length > 0
+          ? rows.reduce((s, r) => s + r.earnedScore, 0)
+          : archivedSummary?.totalEarned || 0;
+      const totalMax =
+        rows.length > 0
+          ? rows.reduce((s, r) => s + r.maxScore, 0)
+          : archivedSummary?.totalPossible || 0;
 
       return {
         subjectName: subjName,
         rows,
+        archivedSummary,
         totalSubs,
         totalEarned,
         totalMax,
       };
     })
-    .filter((tbl) => selectedSubject !== 'الكل' || tbl.rows.length > 0);
+    .filter((tbl) => showAllSubjects || canonicalSelected !== 'الكل' || tbl.rows.length > 0 || Boolean(tbl.archivedSummary));
 
   if (subjectTables.length === 0) {
     return (
@@ -213,13 +286,13 @@ export const StudentSubjectGradeTables: React.FC<StudentSubjectGradeTablesProps>
         </div>
         <h4 className="font-black text-base text-[#1A3A5F]">
           {emptyTitle ||
-            (selectedSubject === 'الكل'
+            (canonicalSelected === 'الكل'
               ? `كشف درجات شهر (${monthLabel}) نظيف ونشط`
-              : `لا توجد درجات مرصودة لمادة (${selectedSubject}) في شهر (${monthLabel})`)}
+              : `لا توجد درجات مرصودة لمادة (${canonicalSelected}) في شهر (${monthLabel})`)}
         </h4>
         <p className="text-xs text-[#5C7085] font-medium max-w-md mx-auto leading-relaxed">
           {emptySubtitle ||
-            (selectedSubject === 'الكل'
+            (canonicalSelected === 'الكل'
               ? `سيتم رصد جدول درجات كل مادة هنا فور حل وتصحيح واجبات شهر (${monthLabel}).`
               : 'ستظهر درجات هذه المادة داخل جدولها فور حل واجباتها أو اعتماد تقييماتها من المعلم.')}
         </p>
@@ -255,9 +328,23 @@ export const StudentSubjectGradeTables: React.FC<StudentSubjectGradeTablesProps>
           </div>
 
           {tbl.rows.length === 0 ? (
-            <div className="p-6 text-center text-xs font-semibold text-[#5C7085]">
-              لا توجد درجات أو تسليمات مسجلة لمادة ({tbl.subjectName}) في شهر ({monthLabel}) بعد.
-            </div>
+            tbl.archivedSummary ? (
+              <div className="p-4 bg-emerald-50/50 space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <span className="font-black text-emerald-900 flex items-center gap-1.5">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                    <span>كشف معتمد من المعلم: {tbl.archivedSummary.teacherName || 'معلم المادة'}</span>
+                  </span>
+                  <span className="px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-900 border border-emerald-200 font-black">
+                    {tbl.archivedSummary.rating} ({tbl.archivedSummary.percentage}%)
+                  </span>
+                </div>
+              </div>
+            ) : (
+              <div className="p-5 text-center text-xs font-semibold text-[#5C7085]">
+                لا توجد درجات أو تسليمات مسجلة لمادة ({tbl.subjectName}) في شهر ({monthLabel}) بعد.
+              </div>
+            )
           ) : (
             <div className="overflow-x-auto">
               <table dir="rtl" className="w-full text-right text-xs sm:text-sm border-collapse">

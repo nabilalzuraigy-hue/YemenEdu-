@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import {
+  Calendar,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
@@ -21,11 +22,13 @@ import {
   appDataService,
   AttendanceRecord,
   AttendanceStatus,
+  ClassSchedule,
   getGradeLabelAr,
   SupervisorActivity,
   SupervisorActivityCategory,
   SupervisorApprovalStatus,
 } from '../services/appData';
+import { ScheduleGridView } from './ScheduleGridView';
 
 interface PrincipalInboxTabProps {
   schoolId: string;
@@ -111,13 +114,16 @@ export const PrincipalInboxTab: React.FC<PrincipalInboxTabProps> = ({
   const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>(() =>
     appDataService.getAttendanceRecords(schoolId)
   );
+  const [classSchedules, setClassSchedules] = useState<ClassSchedule[]>(() =>
+    appDataService.getClassSchedules(schoolId)
+  );
 
   const [statusFilter, setStatusFilter] = useState<'all' | SupervisorApprovalStatus>('pending');
-  const [kindFilter, setKindFilter] = useState<'all' | 'activities' | 'attendance'>('all');
+  const [kindFilter, setKindFilter] = useState<'all' | 'activities' | 'attendance' | 'schedules'>('all');
   const [busyId, setBusyId] = useState<string | null>(null);
   const [noteComposer, setNoteComposer] = useState<{
     id: string;
-    kind: 'activity' | 'attendance';
+    kind: 'activity' | 'attendance' | 'schedule';
     action: 'revision_requested' | 'rejected';
     note: string;
   } | null>(null);
@@ -129,6 +135,7 @@ export const PrincipalInboxTab: React.FC<PrincipalInboxTabProps> = ({
     if (!schoolId) {
       setActivities([]);
       setAttendanceRecords([]);
+      setClassSchedules([]);
       return;
     }
 
@@ -137,12 +144,14 @@ export const PrincipalInboxTab: React.FC<PrincipalInboxTabProps> = ({
     const syncLocal = () => {
       setActivities(appDataService.getSupervisorActivities(schoolId));
       setAttendanceRecords(appDataService.getAttendanceRecords(schoolId));
+      setClassSchedules(appDataService.getClassSchedules(schoolId));
     };
     syncLocal();
     const unsubApp = appDataService.subscribe(syncLocal);
 
     let unsubAct = () => {};
     let unsubAtt = () => {};
+    let unsubSched = () => {};
 
     try {
       const qAct = query(collection(db, 'supervisor_activities'), where('schoolId', '==', schoolId));
@@ -174,30 +183,61 @@ export const PrincipalInboxTab: React.FC<PrincipalInboxTabProps> = ({
       );
     } catch {}
 
+    try {
+      const qSched = query(collection(db, 'class_schedules'), where('schoolId', '==', schoolId));
+      unsubSched = onSnapshot(
+        qSched,
+        (snap) => {
+          const list = snap.docs
+            .map((d) => ({ ...d.data(), id: d.id } as ClassSchedule))
+            .filter((s) => (s.schoolId || '').trim().toLowerCase() === normalizedSchool)
+            .sort((a, b) => Number(a.grade) - Number(b.grade) || (b.uploadedAt || 0) - (a.uploadedAt || 0));
+          setClassSchedules(list);
+        },
+        () => {}
+      );
+    } catch {}
+
     return () => {
       unsubApp();
       unsubAct();
       unsubAtt();
+      unsubSched();
     };
   }, [schoolId]);
 
   const effectiveStatus = (s?: SupervisorApprovalStatus): SupervisorApprovalStatus =>
     s || 'pending';
 
+  const getScheduleEffectiveStatus = (sch: ClassSchedule): SupervisorApprovalStatus => {
+    if (sch.hasPendingUpdate || (!sch.isApproved && sch.approvalStatus !== 'rejected')) {
+      return 'pending';
+    }
+    if (sch.approvalStatus === 'rejected') return 'rejected';
+    return 'approved';
+  };
+
   const pendingCount =
     activities.filter((a) => effectiveStatus(a.approvalStatus) === 'pending').length +
-    attendanceRecords.filter((r) => effectiveStatus(r.approvalStatus) === 'pending').length;
+    attendanceRecords.filter((r) => effectiveStatus(r.approvalStatus) === 'pending').length +
+    classSchedules.filter((s) => getScheduleEffectiveStatus(s) === 'pending').length;
 
   const filteredActivities = activities.filter((a) => {
-    if (kindFilter === 'attendance') return false;
+    if (kindFilter !== 'all' && kindFilter !== 'activities') return false;
     if (statusFilter === 'all') return true;
     return effectiveStatus(a.approvalStatus) === statusFilter;
   });
 
   const filteredAttendance = attendanceRecords.filter((r) => {
-    if (kindFilter === 'activities') return false;
+    if (kindFilter !== 'all' && kindFilter !== 'attendance') return false;
     if (statusFilter === 'all') return true;
     return effectiveStatus(r.approvalStatus) === statusFilter;
+  });
+
+  const filteredSchedules = classSchedules.filter((s) => {
+    if (kindFilter !== 'all' && kindFilter !== 'schedules') return false;
+    if (statusFilter === 'all') return true;
+    return getScheduleEffectiveStatus(s) === statusFilter;
   });
 
   const notifyAction = (msg: string) => {
@@ -253,6 +293,32 @@ export const PrincipalInboxTab: React.FC<PrincipalInboxTabProps> = ({
     }
   };
 
+  const handleReviewSchedule = async (
+    sch: ClassSchedule,
+    action: 'approved' | 'rejected',
+    note?: string
+  ) => {
+    setBusyId(sch.id);
+    try {
+      if (action === 'approved') {
+        await appDataService.approveClassSchedule(sch.id, principalName);
+        notifyAction(
+          `✅ تم اعتماد وتثبيت جدول ${sch.gradeLabel} (فصل ${sch.classNumber}) للترم الأول، وسيظهر الآن في لوحة الطالب والمعلم.`
+        );
+      } else {
+        await appDataService.rejectClassSchedule(sch.id, principalName, note);
+        notifyAction(
+          `تمت إعادة جدول ${sch.gradeLabel} (فصل ${sch.classNumber}) للمشرف للمراجعة.`
+        );
+      }
+      setNoteComposer(null);
+    } catch (err: any) {
+      notifyAction(err?.message || 'تعذر معالجة جدول الحصص.');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   return (
     <div dir="rtl" className="space-y-5 text-right font-['Cairo','Tajawal']">
       {/* Hero Banner */}
@@ -267,7 +333,7 @@ export const PrincipalInboxTab: React.FC<PrincipalInboxTabProps> = ({
                 البريد الوارد من المشرف
               </h2>
               <p className="text-xs sm:text-sm font-bold text-[#28486B] mt-0.5">
-                {schoolName} • مراجعة واعتماد التقارير والأنشطة والفعاليات وكشوفات الحضور
+                {schoolName} • مراجعة واعتماد التقارير والأنشطة والفعاليات وكشوفات الحضور وجداول الحصص
               </p>
             </div>
           </div>
@@ -323,6 +389,7 @@ export const PrincipalInboxTab: React.FC<PrincipalInboxTabProps> = ({
           {(
             [
               { id: 'all', label: 'جميع الوارد' },
+              { id: 'schedules', label: 'جداول الحصص' },
               { id: 'activities', label: 'التقارير والأنشطة والفعاليات' },
               { id: 'attendance', label: 'كشوفات الحضور والغياب' },
             ] as const
@@ -344,16 +411,149 @@ export const PrincipalInboxTab: React.FC<PrincipalInboxTabProps> = ({
       </div>
 
       {/* Empty state */}
-      {filteredActivities.length === 0 && filteredAttendance.length === 0 && (
+      {filteredSchedules.length === 0 && filteredActivities.length === 0 && filteredAttendance.length === 0 && (
         <div className="bg-white rounded-2xl p-8 border border-[#DCE7F3] text-center space-y-2 shadow-sm">
           <Inbox className="w-10 h-10 text-[#9BBEDF] mx-auto" />
           <h3 className="font-black text-sm sm:text-base text-[#1A3A5F]">
             لا توجد عناصر مطابقة في البريد حالياً
           </h3>
           <p className="text-xs text-[#5C7085] font-semibold">
-            عندما يرسل المشرف تقريراً أو نشاطاً أو فعالية أو كشف حضور وغياب سيظهر هنا للمراجعة والاعتماد.
+            عندما يرسل المشرف جدول حصص أو تقريراً أو نشاطاً أو كشف حضور وغياب سيظهر هنا للمراجعة والاعتماد.
           </p>
         </div>
+      )}
+
+      {/* Supervisor Class Schedules in Inbox */}
+      {filteredSchedules.length > 0 && (
+        <section className="space-y-3">
+          <h3 className="text-sm sm:text-base font-black text-[#1A3A5F] flex items-center gap-2">
+            <Calendar className="w-5 h-5 text-[#1F5AAA]" />
+            <span>جداول الحصص المرفوعة من المشرف ({filteredSchedules.length})</span>
+          </h3>
+
+          <div className="space-y-3">
+            {filteredSchedules.map((sch) => {
+              const st = getScheduleEffectiveStatus(sch);
+              const badgeStyle = getApprovalBadgeAndFrame(st);
+              const previewEntries = sch.hasPendingUpdate ? sch.pendingEntries || [] : sch.entries;
+              const previewImageUrl = sch.hasPendingUpdate
+                ? sch.pendingScheduleImageUrl
+                : sch.scheduleImageUrl;
+              const isBusy = busyId === sch.id;
+              const isComposingNote =
+                noteComposer?.id === sch.id && noteComposer?.kind === 'schedule';
+
+              return (
+                <div
+                  key={sch.id}
+                  className={`rounded-2xl p-4 sm:p-5 shadow-sm space-y-3 ${badgeStyle.frame}`}
+                >
+                  <div className="flex flex-wrap items-start justify-between gap-2.5">
+                    <div className="space-y-1">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-black ${badgeStyle.badge}`}>
+                          {sch.hasPendingUpdate ? 'تحديث بانتظار الاعتماد ⏳' : badgeStyle.label}
+                        </span>
+                        <span className="px-2.5 py-0.5 rounded-lg bg-white text-[#1A3A5F] border border-[#DCE7F3] text-xs font-black">
+                          {sch.gradeLabel} — فصل {sch.classNumber}
+                        </span>
+                        <span className="px-2.5 py-0.5 rounded-lg bg-white text-[#1F5AAA] border border-[#C6DCF2] text-[11px] font-black">
+                          الترم {sch.term}
+                        </span>
+                      </div>
+                      <p className="text-[11px] font-bold text-[#5C7085]">
+                        رفعه المشرف:{' '}
+                        {sch.hasPendingUpdate && sch.pendingUploadedBy
+                          ? sch.pendingUploadedBy
+                          : sch.uploadedBy}{' '}
+                        •{' '}
+                        {sch.hasPendingUpdate && sch.pendingUploadedAtFormatted
+                          ? sch.pendingUploadedAtFormatted
+                          : sch.uploadedAtFormatted}
+                      </p>
+                      {sch.rejectionNote && (
+                        <p className="text-xs font-bold text-[#1A3A5F] bg-white/80 rounded-xl px-3 py-1.5 border border-slate-200">
+                          ملاحظة الإدارة: {sch.rejectionNote}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+
+                  <ScheduleGridView
+                    entries={previewEntries}
+                    scheduleImageUrl={previewImageUrl}
+                    compact
+                  />
+
+                  <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-black/10">
+                    {st !== 'approved' && (
+                      <button
+                        type="button"
+                        disabled={isBusy}
+                        onClick={() => handleReviewSchedule(sch, 'approved')}
+                        className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-black flex items-center gap-1.5 shadow-2xs cursor-pointer"
+                      >
+                        <CheckCircle2 className="w-4 h-4" />
+                        <span>{isBusy ? 'جاري الاعتماد...' : 'اعتماد وتثبيت للترم الأول'}</span>
+                      </button>
+                    )}
+
+                    <button
+                      type="button"
+                      disabled={isBusy}
+                      onClick={() =>
+                        setNoteComposer({
+                          id: sch.id,
+                          kind: 'schedule',
+                          action: 'rejected',
+                          note: sch.rejectionNote || '',
+                        })
+                      }
+                      className="px-3.5 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white text-xs font-black flex items-center gap-1.5 shadow-2xs cursor-pointer"
+                    >
+                      <XCircle className="w-4 h-4" />
+                      <span>إرجاع للمشرف للمراجعة</span>
+                    </button>
+                  </div>
+
+                  {isComposingNote && noteComposer && (
+                    <div className="rounded-xl bg-white p-3 border border-slate-300 space-y-2">
+                      <label className="block text-xs font-black text-[#1A3A5F]">
+                        ملاحظة الإرجاع أو التعديل المطلوب من المشرف (اختياري):
+                      </label>
+                      <div className="flex flex-wrap gap-2">
+                        <input
+                          type="text"
+                          value={noteComposer.note}
+                          onChange={(e) =>
+                            setNoteComposer((prev) => (prev ? { ...prev, note: e.target.value } : null))
+                          }
+                          placeholder="مثال: يرجى توضيح صورة الجدول أو تعديل حصة..."
+                          className="flex-1 min-w-[200px] px-3 py-2 rounded-xl border border-[#DCE7F3] text-xs font-semibold text-[#1A3A5F] focus:outline-[#1F5AAA]"
+                        />
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={() => handleReviewSchedule(sch, 'rejected', noteComposer.note)}
+                          className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-black cursor-pointer"
+                        >
+                          تأكيد الإرجاع
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setNoteComposer(null)}
+                          className="px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold cursor-pointer"
+                        >
+                          إلغاء
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </section>
       )}
 
       {/* Supervisor Attendance Sheets in Inbox */}

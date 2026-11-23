@@ -24,7 +24,7 @@ import {
   deleteObject,
 } from 'firebase/storage';
 import { db, storage, ensureAuthReady, handleFirestoreError, OperationType, withTimeout } from '../firebase/config';
-import { cleanFirestorePayload, initSuperAdmin } from './authService';
+import { cleanFirestorePayload, initSuperAdmin, resolveSubjectItem } from './authService';
 import {
   getSchoolPrincipalName,
   isGenericPrincipalSender,
@@ -98,11 +98,13 @@ export interface Announcement {
   title: string;
   content: string;
   target: 'all' | 'teachers' | 'students';
+  targetGrades?: string[]; // empty/undefined/['all'] => all grades, otherwise ['7', '8', ...]
   priority: 'عاجل' | 'هام' | 'عادي';
   senderName: string;
   senderRoleAr: string;
   schoolId?: string;
   createdAt: any;
+  timestamp?: number;
   readCount?: number;
 }
 
@@ -200,10 +202,41 @@ export interface SchoolActivityArchiveBatch {
   activities: SchoolActivityArchiveItem[];
 }
 
+export interface DailyStatsArchiveRecord {
+  id: string; // ds_${schoolId}_${grade}_${dayKey}
+  recordType: 'daily_stats_archive';
+  schoolId: string;
+  grade: string; // '7' | '8' | '9'
+  dayKey: string; // YYYY-MM-DD
+  monthName: string;
+  year: number;
+  totalSubmissions: number;
+  averageScore: number;
+  studentsCount: number;
+  passRate: number;
+  rolloverCompleted: boolean;
+  archivedAt: string;
+  archivedTimestamp: number;
+  subjectBreakdown: Array<{
+    name: string;
+    count: number;
+    percent: number;
+  }>;
+  studentAverages: Array<{
+    studentCode: string;
+    studentName: string;
+    grade?: string;
+    submissionsCount: number;
+    gpa: number;
+    status: 'ناجح' | 'راسب' | 'متميز';
+  }>;
+}
+
 export interface MonthlyReportRecord {
   id: string; // e.g. `${schoolId}_${year}_${monthName}`
   recordType?:
     | 'monthly_report'
+    | 'daily_stats_archive'
     | 'teacher_activities_archive'
     | 'monthly_homework_archive'
     | 'school_activities_archive';
@@ -432,9 +465,54 @@ export function isQuestionArchivedForStudentWeek(q: any, nowMs: number = Date.no
   return nowMs >= archiveAtMs;
 }
 
+function normalizeDateKeyDigits(raw: string): string {
+  const arabicIndic = '٠١٢٣٤٥٦٧٨٩';
+  return raw.replace(/[٠-٩]/g, (d) => String(arabicIndic.indexOf(d)));
+}
+
+export function normalizeSupervisorDateKey(rawDate?: string): string {
+  if (typeof rawDate !== 'string') return '';
+  const clean = normalizeDateKeyDigits(rawDate).trim();
+  if (!clean) return '';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(clean)) return clean;
+  const slashYmd = clean.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})$/);
+  if (slashYmd) {
+    return `${slashYmd[1]}-${slashYmd[2].padStart(2, '0')}-${slashYmd[3].padStart(2, '0')}`;
+  }
+  const dmy = clean.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+  if (dmy) {
+    return `${dmy[3]}-${dmy[2].padStart(2, '0')}-${dmy[1].padStart(2, '0')}`;
+  }
+  return '';
+}
+
+export function getAcademicMonthNameFromDate(d: Date): string {
+  const m = d.getMonth();
+  const map: Record<number, string> = {
+    8: 'سبتمبر',
+    9: 'أكتوبر',
+    10: 'نوفمبر',
+    11: 'ديسمبر',
+    0: 'يناير',
+    1: 'فبراير',
+    2: 'مارس',
+    3: 'أبريل',
+    4: 'مايو',
+    5: 'يونيو',
+    6: 'يونيو',
+    7: 'سبتمبر',
+  };
+  return map[m] || getCurrentAcademicMonth();
+}
+
 export function getSchoolActivityTimestamp(act: any): number {
   if (typeof act?.approvedAt === 'number' && act.approvedAt > 0) return act.approvedAt;
   if (typeof act?.createdAt === 'number' && act.createdAt > 0) return act.createdAt;
+  const normalizedDate = normalizeSupervisorDateKey(act?.activityDate);
+  if (normalizedDate) {
+    const parsed = Date.parse(`${normalizedDate}T09:00:00`);
+    if (!Number.isNaN(parsed)) return parsed;
+  }
   if (typeof act?.activityDate === 'string' && act.activityDate.trim()) {
     const parsed = Date.parse(`${act.activityDate.trim()}T09:00:00`);
     if (!Number.isNaN(parsed)) return parsed;
@@ -442,11 +520,83 @@ export function getSchoolActivityTimestamp(act: any): number {
   return 0;
 }
 
-export function isSchoolActivityArchivedForWeek(act: any, nowMs: number = Date.now()): boolean {
+export function getSchoolActivityDayKey(act: any): string {
+  const normalizedDate = normalizeSupervisorDateKey(act?.activityDate);
+  if (normalizedDate) {
+    return normalizedDate;
+  }
   const ts = getSchoolActivityTimestamp(act);
-  if (!ts || ts <= 0) return false;
-  const { archiveAtMs } = getHomeworkArchiveCutoffInfo(ts);
-  return nowMs >= archiveAtMs;
+  if (ts > 0) return formatDayKeyFromTimestamp(ts);
+  return '';
+}
+
+/**
+ * School activities, reports, and events remain on the live School Board for their scheduled/posted day,
+ * and move automatically into "أرشفة الأنشطة المدرسية" before the start of the next calendar day.
+ */
+export function isSchoolActivityArchivedForDay(act: any, nowMs: number = Date.now()): boolean {
+  const actDayKey = getSchoolActivityDayKey(act);
+  if (!actDayKey) return false;
+  const todayKey = formatDayKeyFromTimestamp(nowMs);
+  return actDayKey < todayKey;
+}
+
+export const isSchoolActivityArchivedForWeek = isSchoolActivityArchivedForDay;
+
+export function normalizeGradeCode(gradeVal?: string, codeVal?: string): string {
+  const g = String(gradeVal || '').trim().toLowerCase();
+  const c = String(codeVal || '').trim().toUpperCase();
+  if (!g && !c) return '';
+  if (g === 'all' || g === 'الكل' || g === 'عام') return 'all';
+
+  const digitMatch = g.match(/\b(1[0-2]|[1-9])\b/);
+  if (digitMatch) return digitMatch[1];
+
+  const arNameMap: Array<[string, string]> = [
+    ['أول', '1'], ['اول', '1'],
+    ['ثاني عشر', '12'], ['حادي عشر', '11'], ['عاشر', '10'],
+    ['تاسع', '9'], ['ثامن', '8'], ['سابع', '7'],
+    ['سادس', '6'], ['خامس', '5'], ['رابع', '4'], ['ثالث', '3'], ['ثاني', '2'],
+  ];
+  for (const [token, id] of arNameMap) {
+    if (g.includes(token)) return id;
+  }
+
+  const codeMatch = c.match(/-(1[0-2]|[1-9])-/);
+  if (codeMatch) return codeMatch[1];
+  return g;
+}
+
+export function doesAnnouncementMatchGrade(
+  anc: Pick<Announcement, 'targetGrades'>,
+  userGrade?: string
+): boolean {
+  const grades = Array.isArray(anc?.targetGrades) ? anc.targetGrades.filter(Boolean) : [];
+  if (
+    grades.length === 0 ||
+    grades.some((g) => {
+      const n = normalizeGradeCode(g);
+      return n === 'all' || g === 'الكل' || g === 'all';
+    })
+  ) {
+    return true;
+  }
+  const normalizedUserGrade = normalizeGradeCode(userGrade);
+  if (!normalizedUserGrade || normalizedUserGrade === 'all') return true;
+  return grades.some((g) => normalizeGradeCode(g) === normalizedUserGrade);
+}
+
+export function formatAnnouncementTargetGradesAr(targetGrades?: string[]): string {
+  const grades = Array.isArray(targetGrades) ? targetGrades.filter(Boolean) : [];
+  if (
+    grades.length === 0 ||
+    grades.some((g) => g === 'all' || g === 'الكل' || normalizeGradeCode(g) === 'all')
+  ) {
+    return 'جميع الصفوف';
+  }
+  const uniqueNorm = Array.from(new Set(grades.map((g) => normalizeGradeCode(g)).filter(Boolean)));
+  if (uniqueNorm.length === 0) return 'جميع الصفوف';
+  return uniqueNorm.map((g) => getGradeLabelAr(g)).join('، ');
 }
 
 export function formatArabicDateTime(dateVal: any): string {
@@ -687,6 +837,7 @@ export interface ClassSchedule {
   classNumber: string;
   term: 'الأول';
   entries: ScheduleSlot[];
+  scheduleImageUrl?: string;
   uploadedBy: string;
   supervisorCode?: string;
   sourceMethod: 'image' | 'manual';
@@ -699,6 +850,7 @@ export interface ClassSchedule {
   approvedAtFormatted?: string;
   rejectionNote?: string;
   pendingEntries?: ScheduleSlot[];
+  pendingScheduleImageUrl?: string;
   pendingUploadedBy?: string;
   pendingUploadedAt?: number;
   pendingUploadedAtFormatted?: string;
@@ -750,7 +902,7 @@ export interface SupervisorActivity {
   activityDate: string;
   inputType?: SupervisorReportInputType;
   originalText?: string; // Original spoken transcript or 1-line photo note
-  formalText?: string; // Final Gemini-drafted & supervisor-reviewed formal text
+  formalText?: string; // Final formal text reviewed by supervisor
   audioUrl?: string; // Firebase Storage download URL for voice recording
   createdBy: string;
   supervisorCode?: string;
@@ -772,7 +924,7 @@ export interface AppNotification {
   title: string;
   message: string;
   relatedId?: string;
-  relatedKind?: 'activity' | 'attendance';
+  relatedKind?: 'activity' | 'attendance' | 'schedule';
   isRead: boolean;
   createdAt: number;
   createdAtFormatted: string;
@@ -1016,10 +1168,12 @@ class AppDataService {
                     title: data.title || 'تعميم إداري',
                     content: data.content || '',
                     target: data.target || 'all',
+                    targetGrades: Array.isArray(data.targetGrades) ? data.targetGrades : undefined,
                     priority: data.priority || 'عادي',
                     senderName: resolvedSender,
                     senderRoleAr: data.senderRoleAr || 'مدير المدرسة',
                     schoolId: data.schoolId,
+                    timestamp: typeof data.timestamp === 'number' ? data.timestamp : undefined,
                     createdAt: data.createdAtFormatted
                       ? String(data.createdAtFormatted)
                       : data.createdAt
@@ -1481,7 +1635,11 @@ class AppDataService {
   }
 
   // --- Announcements ---
-  public getAnnouncements(role?: 'admin' | 'principal' | 'teacher' | 'student', schoolId?: string): Announcement[] {
+  public getAnnouncements(
+    role?: 'admin' | 'principal' | 'teacher' | 'student',
+    schoolId?: string,
+    grade?: string
+  ): Announcement[] {
     if (!schoolId && role !== 'admin') {
       return [];
     }
@@ -1502,15 +1660,23 @@ class AppDataService {
       return list;
     }
     if (role === 'teacher') {
-      return list.filter((a) => a.target === 'all' || a.target === 'teachers');
+      return list.filter(
+        (a) =>
+          (a.target === 'all' || a.target === 'teachers') &&
+          (!grade || doesAnnouncementMatchGrade(a, grade))
+      );
     }
     if (role === 'student') {
-      return list.filter((a) => a.target === 'all' || a.target === 'students');
+      return list.filter(
+        (a) =>
+          (a.target === 'all' || a.target === 'students') &&
+          (!grade || doesAnnouncementMatchGrade(a, grade))
+      );
     }
     return list;
   }
 
-  private lastAnnouncementsAdded: Array<{ schoolId: string; title: string; content: string; time: number }> = [];
+  private lastAnnouncementsAdded: Array<{ schoolId: string; title: string; content: string; gradesKey: string; time: number }> = [];
 
   public async addAnnouncement(anc: Omit<Announcement, 'id' | 'createdAt' | 'readCount'>): Promise<Announcement> {
     await ensureAuthReady();
@@ -1518,13 +1684,19 @@ class AppDataService {
     const cleanTitle = (anc.title || '').trim();
     const cleanContent = (anc.content || '').trim();
     const cleanSchoolId = (anc.schoolId || '').trim().toLowerCase();
+    const normalizedTargetGrades =
+      Array.isArray(anc.targetGrades) && anc.targetGrades.length > 0
+        ? Array.from(new Set(anc.targetGrades.map((g) => normalizeGradeCode(g)).filter(Boolean)))
+        : ['all'];
+    const gradesKey = [...normalizedTargetGrades].sort().join(',');
 
-    // Prevent accidental double-click submission within 5 seconds for the SAME school only
+    // Prevent accidental double-click submission within 5 seconds for the SAME school & target grades
     const isRecentDuplicate = this.lastAnnouncementsAdded.some(
       (a) =>
         a.schoolId === cleanSchoolId &&
         a.title === cleanTitle &&
         a.content === cleanContent &&
+        a.gradesKey === gradesKey &&
         nowMs - a.time < 5000
     );
     if (isRecentDuplicate) {
@@ -1538,14 +1710,22 @@ class AppDataService {
       if (existing) return existing;
     }
 
-    this.lastAnnouncementsAdded.push({ schoolId: cleanSchoolId, title: cleanTitle, content: cleanContent, time: nowMs });
+    this.lastAnnouncementsAdded.push({
+      schoolId: cleanSchoolId,
+      title: cleanTitle,
+      content: cleanContent,
+      gradesKey,
+      time: nowMs,
+    });
     if (this.lastAnnouncementsAdded.length > 20) this.lastAnnouncementsAdded.shift();
 
     const uniqueId = `anc_${nowMs}_${Math.random().toString(36).substring(2, 7)}`;
     const newAnc: Announcement = {
       ...anc,
+      targetGrades: normalizedTargetGrades,
       id: uniqueId,
-      createdAt: new Date().toLocaleDateString('ar-YE'),
+      timestamp: nowMs,
+      createdAt: new Date(nowMs).toLocaleDateString('ar-YE'),
       readCount: 1,
     };
     try {
@@ -1554,8 +1734,9 @@ class AppDataService {
         await setDoc(doc(db, 'circulars', newAnc.id), cleanFirestorePayload({
           ...newAnc,
           schoolId: anc.schoolId,
-          createdAtFormatted: new Date().toLocaleDateString('ar-YE'),
-          createdAt: new Date().toISOString(),
+          createdAtFormatted: new Date(nowMs).toLocaleDateString('ar-YE'),
+          createdAt: new Date(nowMs).toISOString(),
+          timestamp: nowMs,
         }));
       }
       this.announcements = [newAnc, ...this.announcements.filter((a) => a.id !== newAnc.id)];
@@ -1594,10 +1775,18 @@ class AppDataService {
       (r) => (r.schoolId || '').trim().toLowerCase() === normalizedSchoolId
     );
     if (grade && grade !== 'all' && grade !== 'الكل') {
-      list = list.filter((r) => !r.grade || r.grade === 'all' || r.grade === String(grade));
+      const targetNormGrade = normalizeGradeCode(grade);
+      list = list.filter((r) => {
+        const recNormGrade = normalizeGradeCode(r.grade);
+        return !recNormGrade || recNormGrade === 'all' || recNormGrade === targetNormGrade;
+      });
     }
     if (subject && subject !== 'all' && subject !== 'الكل') {
-      list = list.filter((r) => r.subject === subject);
+      const targetCanonical = resolveSubjectItem(subject)?.nameAr || subject.trim();
+      list = list.filter((r) => {
+        const recCanonical = resolveSubjectItem(r.subject)?.nameAr || (r.subject || '').trim();
+        return recCanonical === targetCanonical;
+      });
     }
 
     // Privacy isolation: private recommendations are ONLY visible to the targeted student (or authoring teacher)
@@ -1672,6 +1861,7 @@ class AppDataService {
         .map((d) => d.data() as MonthlyReportRecord)
         .filter(
           (r) =>
+            r.recordType !== 'daily_stats_archive' &&
             r.recordType !== 'teacher_activities_archive' &&
             r.recordType !== 'monthly_homework_archive' &&
             r.recordType !== 'school_activities_archive'
@@ -1680,6 +1870,205 @@ class AppDataService {
       console.warn('Notice reading monthlyReports from Firestore:', error);
       return [];
     }
+  }
+
+  public async getArchivedDailyStats(schoolId: string): Promise<DailyStatsArchiveRecord[]> {
+    await ensureAuthReady();
+    try {
+      const q = query(collection(db, 'monthlyReports'), where('schoolId', '==', schoolId));
+      const snap = await getDocs(q);
+      return snap.docs
+        .map((d) => d.data() as DailyStatsArchiveRecord)
+        .filter((r) => r.recordType === 'daily_stats_archive')
+        .sort((a, b) => (b.dayKey || '').localeCompare(a.dayKey || '') || (b.archivedTimestamp || 0) - (a.archivedTimestamp || 0));
+    } catch (error) {
+      console.warn('Notice reading daily stats archives from Firestore:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Automatically archives daily statistics per independent grade (7, 8, 9) once a day's
+   * submissions rollover has completed (dayKey < todayKey, or submission timestamp < rolloverCutoffMs).
+   */
+  public async syncDailyStatsArchive(
+    schoolId: string,
+    submissionsList: HomeworkSubmission[],
+    studentCodes: Array<{ code: string; assignedToName?: string; name?: string; grade?: string; class?: string }>,
+    nowMs: number = Date.now(),
+    rolloverCutoffMs: number = 0
+  ): Promise<DailyStatsArchiveRecord[]> {
+    if (!schoolId || submissionsList.length === 0) {
+      return schoolId ? this.getArchivedDailyStats(schoolId) : [];
+    }
+    await ensureAuthReady();
+
+    const todayKey = formatDayKeyFromTimestamp(nowMs);
+    const resolveSubTs = (sub: any): number => {
+      if (typeof sub?.timestamp === 'number' && sub.timestamp > 0) return sub.timestamp;
+      if (sub?.createdAt?.toMillis && typeof sub.createdAt.toMillis === 'function') {
+        return sub.createdAt.toMillis();
+      }
+      if (sub?.createdAt?.seconds) return sub.createdAt.seconds * 1000;
+      if (typeof sub?.createdAt === 'string') {
+        const parsed = Date.parse(sub.createdAt);
+        if (!Number.isNaN(parsed)) return parsed;
+      }
+      if (typeof sub?.submittedAt === 'string') {
+        const parsed = Date.parse(sub.submittedAt);
+        if (!Number.isNaN(parsed)) return parsed;
+      }
+      return 0;
+    };
+
+    const grouped = new Map<string, { grade: '7' | '8' | '9'; dayKey: string; items: HomeworkSubmission[]; maxTs: number }>();
+
+    for (const sub of submissionsList) {
+      const ts = resolveSubTs(sub);
+      if (!ts || ts <= 0) continue;
+      const dayKey = formatDayKeyFromTimestamp(ts);
+      const isRolledOver = dayKey < todayKey || (rolloverCutoffMs > 0 && ts < rolloverCutoffMs);
+      if (!isRolledOver) continue;
+
+      const normGrade = normalizeGradeCode(sub.grade || sub.class, sub.studentCode);
+      if (normGrade !== '7' && normGrade !== '8' && normGrade !== '9') continue;
+
+      const mapKey = `${normGrade}_${dayKey}`;
+      const existing = grouped.get(mapKey);
+      if (existing) {
+        existing.items.push(sub);
+        if (ts > existing.maxTs) existing.maxTs = ts;
+      } else {
+        grouped.set(mapKey, { grade: normGrade, dayKey, items: [sub], maxTs: ts });
+      }
+    }
+
+    if (grouped.size === 0) {
+      return this.getArchivedDailyStats(schoolId);
+    }
+
+    const existingRecords = await this.getArchivedDailyStats(schoolId);
+    const existingById = new Map(existingRecords.map((r) => [r.id, r]));
+
+    for (const group of grouped.values()) {
+      const docId = `ds_${schoolId}_${group.grade}_${group.dayKey}`;
+      const prev = existingById.get(docId);
+      if (prev && prev.totalSubmissions === group.items.length) {
+        continue;
+      }
+
+      const [yrStr, moStr, dyStr] = group.dayKey.split('-');
+      const dayDate = new Date(Number(yrStr), Number(moStr) - 1, Number(dyStr));
+      const monthName = ARCHIVE_MONTH_AR_MAP[dayDate.getMonth()] || getCurrentAcademicMonth();
+      const year = dayDate.getFullYear();
+
+      const studentMap: Record<
+        string,
+        { code: string; name: string; grade: string; count: number; totalScore: number; maxScore: number }
+      > = {};
+
+      studentCodes
+        .filter((c) => normalizeGradeCode(c.grade || c.class, c.code) === group.grade)
+        .forEach((c) => {
+          studentMap[c.code] = {
+            code: c.code,
+            name: c.assignedToName || c.name || 'طالب',
+            grade: group.grade,
+            count: 0,
+            totalScore: 0,
+            maxScore: 0,
+          };
+        });
+
+      const subjCounts: Record<string, number> = {};
+      group.items.forEach((s) => {
+        const sName = (s.subject || 'المادة').trim();
+        subjCounts[sName] = (subjCounts[sName] || 0) + 1;
+        const sc = s.studentCode || '';
+        if (!studentMap[sc]) {
+          studentMap[sc] = {
+            code: sc,
+            name: s.studentName || 'طالب',
+            grade: group.grade,
+            count: 0,
+            totalScore: 0,
+            maxScore: 0,
+          };
+        }
+        studentMap[sc].count += 1;
+        studentMap[sc].totalScore += Number(s.score ?? 5);
+        studentMap[sc].maxScore += Number(s.maxScore ?? 5);
+      });
+
+      const studentAverages = Object.values(studentMap)
+        .map((st) => {
+          const gpa =
+            st.maxScore > 0 ? Math.round((st.totalScore / st.maxScore) * 100) : st.count > 0 ? 85 : 0;
+          let status: 'ناجح' | 'راسب' | 'متميز' = 'ناجح';
+          if (gpa >= 90) status = 'متميز';
+          else if (gpa < 50) status = 'راسب';
+          return {
+            studentCode: st.code,
+            studentName: st.name,
+            grade: st.grade,
+            submissionsCount: st.count,
+            gpa,
+            status,
+          };
+        })
+        .sort((a, b) => b.gpa - a.gpa);
+
+      const averageScore =
+        studentAverages.length > 0
+          ? Math.round(studentAverages.reduce((acc, cur) => acc + cur.gpa, 0) / studentAverages.length)
+          : 0;
+      const passRate =
+        studentAverages.length > 0
+          ? Math.round((studentAverages.filter((s) => s.gpa >= 50).length / studentAverages.length) * 100)
+          : 0;
+      const totalSubmissions = group.items.length;
+      const subjectBreakdown = Object.entries(subjCounts)
+        .map(([name, count]) => ({
+          name,
+          count,
+          percent: totalSubmissions > 0 ? Math.round((count / totalSubmissions) * 100) : 0,
+        }))
+        .sort((a, b) => b.count - a.count);
+
+      const record: DailyStatsArchiveRecord = {
+        id: docId,
+        recordType: 'daily_stats_archive',
+        schoolId,
+        grade: group.grade,
+        dayKey: group.dayKey,
+        monthName,
+        year,
+        totalSubmissions,
+        averageScore,
+        studentsCount: studentAverages.length,
+        passRate,
+        rolloverCompleted: true,
+        archivedAt: dayDate.toLocaleDateString('ar-YE', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric',
+        }),
+        archivedTimestamp: dayDate.getTime() || group.maxTs,
+        subjectBreakdown,
+        studentAverages: studentAverages.slice(0, 60),
+      };
+
+      try {
+        await setDoc(doc(db, 'monthlyReports', docId), cleanFirestorePayload(record));
+        existingById.set(docId, record);
+      } catch (error) {
+        console.warn('Notice archiving daily stats:', error);
+      }
+    }
+
+    return Array.from(existingById.values()).sort(
+      (a, b) => (b.dayKey || '').localeCompare(a.dayKey || '') || (b.archivedTimestamp || 0) - (a.archivedTimestamp || 0)
+    );
   }
 
   public async getArchivedTeacherActivityBatches(schoolId: string): Promise<TeacherActivityArchiveBatch[]> {
@@ -2011,7 +2400,7 @@ class AppDataService {
     }
   }
 
-  public async syncThursdaySchoolActivitiesArchive(
+  public async syncDailySchoolActivitiesArchive(
     schoolId: string,
     activitiesList: SupervisorActivity[],
     nowMs: number = Date.now()
@@ -2027,24 +2416,27 @@ class AppDataService {
     const grouped = new Map<
       string,
       {
-        thuDate: Date;
+        dayDate: Date;
         archiveAtMs: number;
         monthName: string;
         year: number;
-        weekLabel: string;
+        dayLabel: string;
         items: SchoolActivityArchiveItem[];
       }
     >();
 
     for (const act of approvedList) {
-      const ts = getSchoolActivityTimestamp(act);
-      if (!ts || ts <= 0) continue;
-      const info = getHomeworkArchiveCutoffInfo(ts);
-      if (nowMs < info.archiveAtMs) {
-        continue; // Keep active on School Board until Thursday cutoff arrives
+      if (!isSchoolActivityArchivedForDay(act, nowMs)) {
+        continue; // Keep active on School Board until the start of the next day
       }
+      const actDayKey = getSchoolActivityDayKey(act);
+      const ts = getSchoolActivityTimestamp(act) || (actDayKey ? Date.parse(`${actDayKey}T09:00:00`) : 0);
+      if (!actDayKey || !ts || ts <= 0) continue;
 
-      const d = new Date(ts);
+      const [yrStr, moStr, dyStr] = actDayKey.split('-');
+      const dayDate = new Date(Number(yrStr), Number(moStr) - 1, Number(dyStr), 9, 0, 0, 0);
+      const monthName = getAcademicMonthNameFromDate(dayDate);
+      const year = dayDate.getFullYear();
       const imgs = Array.isArray(act.images) ? act.images : [];
       const item: SchoolActivityArchiveItem = cleanFirestorePayload({
         id: act.id,
@@ -2054,14 +2446,14 @@ class AppDataService {
         formalText: (act.formalText || act.details || '').trim(),
         targetGrade: act.targetGrade || 'الكل',
         targetClass: act.targetClass || 'الكل',
-        activityDate: act.activityDate || '',
+        activityDate: act.activityDate || actDayKey,
         createdBy: act.createdBy || 'المشرف',
         approvedBy: act.approvedBy || 'مدير المدرسة',
         coverImage: imgs[0] && imgs[0].length <= 180_000 ? imgs[0] : undefined,
         imagesCount: imgs.length,
         inputType: act.inputType,
         timestamp: ts,
-        dateLabel: d.toLocaleDateString('ar-YE', {
+        dateLabel: dayDate.toLocaleDateString('ar-YE', {
           year: 'numeric',
           month: 'short',
           day: 'numeric',
@@ -2069,18 +2461,18 @@ class AppDataService {
         timeLabel: formatArabicDateTime(ts),
       });
 
-      const existing = grouped.get(info.thursdayKey);
+      const existing = grouped.get(actDayKey);
       if (existing) {
         if (!existing.items.some((x) => x.id === item.id)) {
           existing.items.push(item);
         }
       } else {
-        grouped.set(info.thursdayKey, {
-          thuDate: info.thuDate,
-          archiveAtMs: info.archiveAtMs,
-          monthName: info.monthName,
-          year: info.year,
-          weekLabel: info.weekLabel,
+        grouped.set(actDayKey, {
+          dayDate,
+          archiveAtMs: dayDate.getTime(),
+          monthName,
+          year,
+          dayLabel: formatArabicDayLabel(actDayKey, nowMs),
           items: [item],
         });
       }
@@ -2093,8 +2485,8 @@ class AppDataService {
     const existingBatches = await this.getArchivedSchoolActivityBatches(schoolId);
     const existingById = new Map(existingBatches.map((b) => [b.id, b]));
 
-    for (const [thursdayKey, group] of grouped.entries()) {
-      const docId = `sa_${schoolId}_${thursdayKey}`;
+    for (const [dayKey, group] of grouped.entries()) {
+      const docId = `sa_${schoolId}_${dayKey}`;
       const prevBatch = existingById.get(docId);
 
       const mergedMap = new Map<string, SchoolActivityArchiveItem>();
@@ -2102,7 +2494,13 @@ class AppDataService {
       group.items.forEach((it) => mergedMap.set(it.id, it));
       let mergedItems = Array.from(mergedMap.values()).sort((a, b) => b.timestamp - a.timestamp);
 
-      if (prevBatch && prevBatch.activities.length === mergedItems.length) {
+      const getBatchSignature = (items: SchoolActivityArchiveItem[]) =>
+        items
+          .map((it) => `${it.id}|${it.title}|${it.category}|${it.subType || ''}|${it.targetGrade}|${it.formalText}`)
+          .sort()
+          .join(';;');
+
+      if (prevBatch && getBatchSignature(prevBatch.activities || []) === getBatchSignature(mergedItems)) {
         continue;
       }
 
@@ -2116,11 +2514,11 @@ class AppDataService {
         id: docId,
         recordType: 'school_activities_archive',
         schoolId,
-        thursdayKey,
-        weekLabel: group.weekLabel,
+        thursdayKey: dayKey,
+        weekLabel: group.dayLabel,
         year: group.year,
         monthName: group.monthName,
-        archivedAt: group.thuDate.toLocaleDateString('ar-YE', {
+        archivedAt: group.dayDate.toLocaleDateString('ar-YE', {
           year: 'numeric',
           month: 'long',
           day: 'numeric',
@@ -2135,13 +2533,21 @@ class AppDataService {
         await setDoc(doc(db, 'monthlyReports', docId), cleanFirestorePayload(batchRecord));
         existingById.set(docId, batchRecord);
       } catch (error) {
-        console.warn('Notice archiving Thursday school activities:', error);
+        console.warn('Notice archiving daily school activities:', error);
       }
     }
 
     return Array.from(existingById.values()).sort(
       (a, b) => (b.archivedTimestamp || 0) - (a.archivedTimestamp || 0)
     );
+  }
+
+  public async syncThursdaySchoolActivitiesArchive(
+    schoolId: string,
+    activitiesList: SupervisorActivity[],
+    nowMs: number = Date.now()
+  ): Promise<SchoolActivityArchiveBatch[]> {
+    return this.syncDailySchoolActivitiesArchive(schoolId, activitiesList, nowMs);
   }
 
   // --- Monthly Teacher Gradebook Archiving & Rollover ---
@@ -3026,6 +3432,7 @@ class AppDataService {
     grade: string;
     classNumber: string;
     entries: ScheduleSlot[];
+    scheduleImageUrl?: string;
     uploadedBy: string;
     supervisorCode?: string;
     sourceMethod: 'image' | 'manual';
@@ -3036,7 +3443,7 @@ class AppDataService {
     const now = Date.now();
     const nowFormatted = formatArabicDateTime(new Date(now));
 
-    const cleanEntries = input.entries
+    const cleanEntries = (input.entries || [])
       .filter((slot) => (slot.subject || '').trim().length > 0 || (slot.teacherName || '').trim().length > 0)
       .map((slot) =>
         cleanFirestorePayload({
@@ -3048,8 +3455,13 @@ class AppDataService {
         })
       );
 
-    if (cleanEntries.length === 0) {
-      throw new Error('يرجى إدخال حصة واحدة على الأقل في الجدول قبل الإرسال للاعتماد.');
+    const cleanScheduleImageUrl =
+      typeof input.scheduleImageUrl === 'string' && input.scheduleImageUrl.trim().length > 0
+        ? input.scheduleImageUrl.trim()
+        : undefined;
+
+    if (cleanEntries.length === 0 && !cleanScheduleImageUrl) {
+      throw new Error('يرجى تعبئة حصة واحدة على الأقل في الجدول أو إرفاق صورة الجدول لرفعها كما هي قبل الإرسال.');
     }
 
     let existingDoc: ClassSchedule | null =
@@ -3064,14 +3476,17 @@ class AppDataService {
     // If an approved schedule already exists, keep it live & fixed until Principal approves the newly uploaded version!
     let nextRecord: ClassSchedule;
     if (existingDoc && existingDoc.isApproved) {
+      const baseExisting = { ...existingDoc };
+      delete baseExisting.pendingScheduleImageUrl;
       nextRecord = cleanFirestorePayload({
-        ...existingDoc,
+        ...baseExisting,
         id: docId,
         grade: String(input.grade).trim(),
         gradeLabel: getGradeLabelAr(String(input.grade).trim()),
         classNumber: classNum,
         term: 'الأول',
         pendingEntries: cleanEntries,
+        pendingScheduleImageUrl: cleanScheduleImageUrl,
         pendingUploadedBy: input.uploadedBy,
         pendingUploadedAt: now,
         pendingUploadedAtFormatted: nowFormatted,
@@ -3088,6 +3503,7 @@ class AppDataService {
         classNumber: classNum,
         term: 'الأول',
         entries: cleanEntries,
+        scheduleImageUrl: cleanScheduleImageUrl,
         uploadedBy: input.uploadedBy,
         supervisorCode: input.supervisorCode,
         sourceMethod: input.sourceMethod,
@@ -3103,6 +3519,16 @@ class AppDataService {
       await setDoc(doc(db, 'class_schedules', docId), nextRecord);
       this.classSchedules = [nextRecord, ...this.classSchedules.filter((s) => s.id !== docId)];
       this.notify();
+
+      await this.createNotification({
+        schoolId: nextRecord.schoolId,
+        recipientRole: 'principal',
+        type: 'new_report',
+        title: nextRecord.hasPendingUpdate ? 'تحديث جدول حصص بانتظار اعتمادك' : 'جدول حصص جديد بانتظار اعتمادك',
+        message: `${nextRecord.hasPendingUpdate ? 'تحديث جدول حصص' : 'جدول حصص جديد'} بانتظار اعتمادك: ${nextRecord.gradeLabel} (فصل ${nextRecord.classNumber})`,
+        relatedId: docId,
+        relatedKind: 'schedule',
+      });
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, `class_schedules/${docId}`);
     }
@@ -3120,6 +3546,19 @@ class AppDataService {
 
     const now = Date.now();
     const nowFormatted = formatArabicDateTime(new Date(now));
+    const hasPending = Boolean(existing.hasPendingUpdate);
+
+    const nextEntries = hasPending
+      ? (existing.pendingEntries && existing.pendingEntries.length > 0
+          ? existing.pendingEntries
+          : existing.pendingScheduleImageUrl
+          ? []
+          : existing.entries)
+      : existing.entries;
+
+    const nextImageUrl = hasPending
+      ? existing.pendingScheduleImageUrl
+      : existing.scheduleImageUrl;
 
     const updated: ClassSchedule = cleanFirestorePayload({
       id: existing.id,
@@ -3128,12 +3567,13 @@ class AppDataService {
       gradeLabel: existing.gradeLabel,
       classNumber: existing.classNumber,
       term: 'الأول',
-      entries: existing.hasPendingUpdate && existing.pendingEntries?.length ? existing.pendingEntries : existing.entries,
-      uploadedBy: existing.hasPendingUpdate && existing.pendingUploadedBy ? existing.pendingUploadedBy : existing.uploadedBy,
+      entries: nextEntries || [],
+      scheduleImageUrl: nextImageUrl,
+      uploadedBy: hasPending && existing.pendingUploadedBy ? existing.pendingUploadedBy : existing.uploadedBy,
       supervisorCode: existing.supervisorCode,
-      sourceMethod: existing.hasPendingUpdate && existing.pendingSourceMethod ? existing.pendingSourceMethod : existing.sourceMethod,
-      uploadedAt: existing.hasPendingUpdate && existing.pendingUploadedAt ? existing.pendingUploadedAt : existing.uploadedAt,
-      uploadedAtFormatted: existing.hasPendingUpdate && existing.pendingUploadedAtFormatted ? existing.pendingUploadedAtFormatted : existing.uploadedAtFormatted,
+      sourceMethod: hasPending && existing.pendingSourceMethod ? existing.pendingSourceMethod : existing.sourceMethod,
+      uploadedAt: hasPending && existing.pendingUploadedAt ? existing.pendingUploadedAt : existing.uploadedAt,
+      uploadedAtFormatted: hasPending && existing.pendingUploadedAtFormatted ? existing.pendingUploadedAtFormatted : existing.uploadedAtFormatted,
       isApproved: true,
       approvalStatus: 'approved',
       approvedBy: principalName || 'مدير المدرسة',
@@ -3146,6 +3586,17 @@ class AppDataService {
       await setDoc(doc(db, 'class_schedules', scheduleId), updated);
       this.classSchedules = [updated, ...this.classSchedules.filter((s) => s.id !== scheduleId)];
       this.notify();
+
+      await this.createNotification({
+        schoolId: updated.schoolId,
+        recipientRole: 'supervisor',
+        recipientCode: updated.supervisorCode,
+        type: 'approved',
+        title: 'تم اعتماد جدول الحصص وتثبيته',
+        message: `تم اعتماد جدول الحصص (${updated.gradeLabel} — فصل ${updated.classNumber}) وتثبيته للترم الأول في بوابة الطالب والمعلم.`,
+        relatedId: scheduleId,
+        relatedKind: 'schedule',
+      });
     } catch (error) {
       handleFirestoreError(error, OperationType.UPDATE, `class_schedules/${scheduleId}`);
     }
@@ -3169,6 +3620,7 @@ class AppDataService {
           classNumber: existing.classNumber,
           term: 'الأول',
           entries: existing.entries,
+          scheduleImageUrl: existing.scheduleImageUrl,
           uploadedBy: existing.uploadedBy,
           supervisorCode: existing.supervisorCode,
           sourceMethod: existing.sourceMethod,
@@ -3194,6 +3646,17 @@ class AppDataService {
       await setDoc(doc(db, 'class_schedules', scheduleId), updated);
       this.classSchedules = [updated, ...this.classSchedules.filter((s) => s.id !== scheduleId)];
       this.notify();
+
+      await this.createNotification({
+        schoolId: updated.schoolId,
+        recipientRole: 'supervisor',
+        recipientCode: updated.supervisorCode,
+        type: 'rejected',
+        title: 'تمت إعادة جدول الحصص للمراجعة',
+        message: `تمت إعادة جدول الحصص (${updated.gradeLabel} — فصل ${updated.classNumber}) للمراجعة: ${updated.rejectionNote || 'يرجى التعديل وإعادة الإرسال'}`,
+        relatedId: scheduleId,
+        relatedKind: 'schedule',
+      });
     } catch (error) {
       handleFirestoreError(error, OperationType.UPDATE, `class_schedules/${scheduleId}`);
     }

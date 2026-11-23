@@ -13,17 +13,9 @@ import {
   Info,
   Check,
   ChevronDown,
-  ChevronUp,
+  ChevronLeft,
   Activity,
   AlertTriangle,
-  Calendar,
-  UserCheck,
-  CheckCircle2,
-  XCircle,
-  Lock,
-  Flag,
-  Eye,
-  Sparkles,
 } from 'lucide-react';
 import { collection, query, where, onSnapshot } from 'firebase/firestore';
 import { db } from '../firebase/config';
@@ -31,18 +23,13 @@ import {
   HomeworkSubmission,
   Question,
   appDataService,
+  DailyStatsArchiveRecord,
   MonthlyReportRecord,
   getQuestionTimestamp,
   getCurrentAcademicMonth,
-  AttendanceRecord,
-  ClassSchedule,
-  SupervisorActivity,
-  SupervisorActivityCategory,
-  SUPERVISOR_ACTIVITY_CATEGORIES,
-  getGradeLabelAr,
+  formatDayKeyFromTimestamp,
 } from '../services/appData';
-import { ScheduleGridView } from './ScheduleGridView';
-import { authService } from '../services/authService';
+import { authService, ActivationCodeRecord } from '../services/authService';
 import {
   formatArabicSchoolName,
   formatRelativeTimeAr,
@@ -56,6 +43,7 @@ interface PrincipalStatsTabProps {
   schoolId?: string;
   schoolName?: string;
   principalName?: string;
+  onOpenStatsArchive?: () => void;
 }
 
 const ACADEMIC_MONTHS = [
@@ -105,6 +93,7 @@ export const PrincipalStatsTab: React.FC<PrincipalStatsTabProps> = ({
   schoolId,
   schoolName = '',
   principalName = '',
+  onOpenStatsArchive,
 }) => {
   const displaySchoolName = formatArabicSchoolName(schoolName, schoolId);
   const [reportMode, setReportMode] = useState<'weekly' | 'monthly' | 'cumulative'>('weekly');
@@ -115,30 +104,46 @@ export const PrincipalStatsTab: React.FC<PrincipalStatsTabProps> = ({
   const [nowTick, setNowTick] = useState<number>(() => Date.now());
   const [showAllActivities, setShowAllActivities] = useState(false);
 
-  // Monthly Reports State
+  // Monthly Reports & Daily Auto-Archive State
   const currentYear = new Date().getFullYear();
   const [selectedMonth, setSelectedMonth] = useState<string>(() => getCurrentAcademicMonth());
   const [selectedYear, setSelectedYear] = useState<number>(currentYear);
   const [archivedReports, setArchivedReports] = useState<MonthlyReportRecord[]>([]);
+  const [dailyArchivedStats, setDailyArchivedStats] = useState<DailyStatsArchiveRecord[]>([]);
+  const [latestRolloverTs, setLatestRolloverTs] = useState<number>(0);
+  const [registeredSchoolStudents, setRegisteredSchoolStudents] = useState<ActivationCodeRecord[]>(() =>
+    schoolId
+      ? authService
+          .getRegisteredCodes()
+          .filter(
+            (c) =>
+              c.role === 'student' &&
+              (c.schoolId || '').trim().toLowerCase() === schoolId.trim().toLowerCase()
+          )
+      : []
+  );
   const [isArchiving, setIsArchiving] = useState(false);
   const [archiveSuccessMsg, setArchiveSuccessMsg] = useState<string | null>(null);
 
-  // Supervisor Portal Data (Schedules for Approval + Read-only Attendance & Activities Reports)
-  const [classSchedules, setClassSchedules] = useState<ClassSchedule[]>(() =>
-    schoolId ? appDataService.getClassSchedules(schoolId) : []
-  );
-  const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>(() =>
-    schoolId ? appDataService.getAttendanceRecords(schoolId) : []
-  );
-  const [supervisorActivities, setSupervisorActivities] = useState<SupervisorActivity[]>(() =>
-    schoolId ? appDataService.getSupervisorActivities(schoolId) : []
-  );
-  const [scheduleBusyId, setScheduleBusyId] = useState<string | null>(null);
-  const [rejectNoteOpenId, setRejectNoteOpenId] = useState<string | null>(null);
-  const [rejectNoteText, setRejectNoteText] = useState<string>('');
-  const [expandedApprovedScheduleId, setExpandedApprovedScheduleId] = useState<string | null>(null);
-  const [expandedAttendanceId, setExpandedAttendanceId] = useState<string | null>(null);
-  const [supervisorActFilter, setSupervisorActFilter] = useState<'الكل' | SupervisorActivityCategory>('الكل');
+  // Sync registered student codes reactively
+  useEffect(() => {
+    if (!schoolId) {
+      setRegisteredSchoolStudents([]);
+      return;
+    }
+    const normSchool = schoolId.trim().toLowerCase();
+    const syncCodes = () => {
+      setRegisteredSchoolStudents(
+        authService
+          .getRegisteredCodes()
+          .filter(
+            (c) => c.role === 'student' && (c.schoolId || '').trim().toLowerCase() === normSchool
+          )
+      );
+    };
+    syncCodes();
+    return authService.subscribe(syncCodes);
+  }, [schoolId]);
 
   // Real-time Firestore sync for submissions strictly filtered by schoolId
   useEffect(() => {
@@ -184,7 +189,7 @@ export const PrincipalStatsTab: React.FC<PrincipalStatsTabProps> = ({
     }
   }, [schoolId, initialSubmissions]);
 
-  // Real-time listener for archived monthlyReports in Firestore
+  // Real-time listener for archived monthlyReports & daily_stats_archive in Firestore
   useEffect(() => {
     if (!schoolId) return;
     try {
@@ -192,16 +197,75 @@ export const PrincipalStatsTab: React.FC<PrincipalStatsTabProps> = ({
       const unsub = onSnapshot(
         qRep,
         (snap) => {
-          const list = snap.docs
-            .map((d) => d.data() as MonthlyReportRecord)
-            .filter((r) => r.recordType !== 'teacher_activities_archive' && r.recordType !== 'monthly_homework_archive');
-          setArchivedReports(list);
+          const allDocs = snap.docs.map((d) => d.data() as any);
+          setArchivedReports(
+            allDocs.filter(
+              (r) =>
+                r.recordType !== 'daily_stats_archive' &&
+                r.recordType !== 'teacher_activities_archive' &&
+                r.recordType !== 'monthly_homework_archive' &&
+                r.recordType !== 'school_activities_archive'
+            ) as MonthlyReportRecord[]
+          );
+          setDailyArchivedStats(
+            (allDocs.filter((r) => r.recordType === 'daily_stats_archive') as DailyStatsArchiveRecord[]).sort(
+              (a, b) => (b.dayKey || '').localeCompare(a.dayKey || '')
+            )
+          );
         },
         () => {}
       );
       return () => unsub();
     } catch {}
   }, [schoolId]);
+
+  // Listen to teacher rollover metadata so daily stats archive triggers right when rollover completes
+  useEffect(() => {
+    if (!schoolId) return;
+    try {
+      const qGb = query(collection(db, 'monthlyGradebooks'), where('schoolId', '==', schoolId));
+      const unsub = onSnapshot(
+        qGb,
+        (snap) => {
+          let maxTs = 0;
+          snap.docs.forEach((d) => {
+            if (d.id.startsWith('meta_')) {
+              const data = d.data() as any;
+              if (typeof data?.rolloverTimestamp === 'number' && data.rolloverTimestamp > maxTs) {
+                maxTs = data.rolloverTimestamp;
+              }
+            }
+          });
+          setLatestRolloverTs(maxTs);
+        },
+        () => {}
+      );
+      return () => unsub();
+    } catch {}
+  }, [schoolId]);
+
+  // Auto-archive daily statistics whenever submissions rollover completes (previous day or rolloverTimestamp)
+  useEffect(() => {
+    if (!schoolId || liveSubmissions.length === 0) return;
+    appDataService
+      .syncDailyStatsArchive(
+        schoolId,
+        liveSubmissions,
+        registeredSchoolStudents.map((c) => ({
+          code: c.code,
+          assignedToName: c.assignedToName,
+          name: (c as any).name,
+          grade: c.grade,
+          class: (c as any).class,
+        })),
+        nowTick,
+        latestRolloverTs
+      )
+      .then((updated) => {
+        if (updated.length > 0) setDailyArchivedStats(updated);
+      })
+      .catch(() => {});
+  }, [schoolId, liveSubmissions, registeredSchoolStudents, nowTick, latestRolloverTs]);
 
   // Real-time Firestore listener for published questions (for Daily Activities, >24h Overdue Alert & Thursday auto-archive)
   useEffect(() => {
@@ -238,80 +302,6 @@ export const PrincipalStatsTab: React.FC<PrincipalStatsTabProps> = ({
     const timer = setInterval(() => setNowTick(Date.now()), 60_000);
     return () => clearInterval(timer);
   }, []);
-
-  // Real-time Firestore listeners for Supervisor Schedules, Attendance Reports, and Activities
-  useEffect(() => {
-    if (!schoolId) {
-      setClassSchedules([]);
-      setAttendanceRecords([]);
-      setSupervisorActivities([]);
-      return;
-    }
-    const normalizedSchool = schoolId.trim().toLowerCase();
-
-    const syncLocal = () => {
-      setClassSchedules(appDataService.getClassSchedules(schoolId));
-      setAttendanceRecords(appDataService.getAttendanceRecords(schoolId));
-      setSupervisorActivities(appDataService.getSupervisorActivities(schoolId));
-    };
-    const unsubApp = appDataService.subscribe(syncLocal);
-
-    let unsubSched = () => {};
-    let unsubAtt = () => {};
-    let unsubAct = () => {};
-
-    try {
-      const qSched = query(collection(db, 'class_schedules'), where('schoolId', '==', schoolId));
-      unsubSched = onSnapshot(
-        qSched,
-        (snap) => {
-          const list = snap.docs
-            .map((d) => ({ ...d.data(), id: d.id } as ClassSchedule))
-            .filter((s) => (s.schoolId || '').trim().toLowerCase() === normalizedSchool)
-            .sort((a, b) => Number(a.grade) - Number(b.grade) || (b.uploadedAt || 0) - (a.uploadedAt || 0));
-          setClassSchedules(list);
-        },
-        () => setClassSchedules(appDataService.getClassSchedules(schoolId))
-      );
-    } catch {}
-
-    try {
-      const qAtt = query(collection(db, 'attendance_records'), where('schoolId', '==', schoolId));
-      unsubAtt = onSnapshot(
-        qAtt,
-        (snap) => {
-          const list = snap.docs
-            .map((d) => ({ ...d.data(), id: d.id } as AttendanceRecord))
-            .filter((r) => (r.schoolId || '').trim().toLowerCase() === normalizedSchool)
-            .sort((a, b) => (b.date || '').localeCompare(a.date || '') || (b.createdAt || 0) - (a.createdAt || 0));
-          setAttendanceRecords(list);
-        },
-        () => setAttendanceRecords(appDataService.getAttendanceRecords(schoolId))
-      );
-    } catch {}
-
-    try {
-      const qAct = query(collection(db, 'supervisor_activities'), where('schoolId', '==', schoolId));
-      unsubAct = onSnapshot(
-        qAct,
-        (snap) => {
-          const list = snap.docs
-            .map((d) => ({ ...d.data(), id: d.id } as SupervisorActivity))
-            .filter((a) => (a.schoolId || '').trim().toLowerCase() === normalizedSchool)
-            .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-          setSupervisorActivities(list);
-        },
-        () => setSupervisorActivities(appDataService.getSupervisorActivities(schoolId))
-      );
-    } catch {}
-
-    return () => {
-      unsubApp();
-      unsubSched();
-      unsubAtt();
-      unsubAct();
-    };
-  }, [schoolId]);
 
   // Strict Grade Matching Helper: keeps grades 7, 8, 9 completely isolated
   const matchesGrade = (gradeVal?: string, codeVal?: string): boolean => {
@@ -775,61 +765,17 @@ export const PrincipalStatsTab: React.FC<PrincipalStatsTabProps> = ({
     (principalName && !isGenericPrincipalSender(principalName) ? principalName.trim() : '') ||
     getSchoolPrincipalName(schoolId, schoolName);
 
-  const matchesSupervisorGrade = (gradeVal?: string): boolean => {
-    const g = String(gradeVal || '').trim().toLowerCase();
-    if (!g || g === 'all' || g === 'الكل') return true;
-    if (selectedGradeFilter === 'سابع') return g === '7' || g.includes('سابع');
-    if (selectedGradeFilter === 'ثامن') return g === '8' || g.includes('ثامن');
-    if (selectedGradeFilter === 'تاسع') return g === '9' || g.includes('تاسع');
-    return true;
-  };
-
-  const pendingSchedules = classSchedules.filter(
-    (s) => (!s.isApproved && s.approvalStatus !== 'rejected') || Boolean(s.hasPendingUpdate)
-  );
-  const approvedSchedules = classSchedules.filter(
-    (s) => s.isApproved && matchesSupervisorGrade(s.grade)
-  );
-  const filteredAttendanceRecords = attendanceRecords.filter((r) =>
-    matchesSupervisorGrade(r.grade)
-  );
-  const filteredSupervisorActivities = supervisorActivities.filter(
-    (a) =>
-      matchesSupervisorGrade(a.targetGrade) &&
-      (supervisorActFilter === 'الكل' || a.category === supervisorActFilter)
-  );
-
-  const handleApproveSchedule = async (sch: ClassSchedule) => {
-    setScheduleBusyId(sch.id);
-    try {
-      await appDataService.approveClassSchedule(sch.id, displayManagerName);
-      setArchiveSuccessMsg(
-        `✅ تم اعتماد وتثبيت جدول الحصص (${sch.gradeLabel} - فصل ${sch.classNumber}) للترم الأول بنجاح.`
-      );
-      setTimeout(() => setArchiveSuccessMsg(null), 5000);
-    } catch (err: any) {
-      setArchiveSuccessMsg(err?.message || 'حدث خطأ أثناء اعتماد الجدول.');
-    } finally {
-      setScheduleBusyId(null);
-    }
-  };
-
-  const handleRejectSchedule = async (sch: ClassSchedule) => {
-    setScheduleBusyId(sch.id);
-    try {
-      await appDataService.rejectClassSchedule(sch.id, displayManagerName, rejectNoteText);
-      setRejectNoteOpenId(null);
-      setRejectNoteText('');
-      setArchiveSuccessMsg(
-        `تمت إعادة جدول (${sch.gradeLabel} - فصل ${sch.classNumber}) للمشرف للمراجعة.`
-      );
-      setTimeout(() => setArchiveSuccessMsg(null), 5000);
-    } catch (err: any) {
-      setArchiveSuccessMsg(err?.message || 'حدث خطأ أثناء إرجاع الجدول.');
-    } finally {
-      setScheduleBusyId(null);
-    }
-  };
+  const selectedGradeCode =
+    selectedGradeFilter === 'سابع' ? '7' : selectedGradeFilter === 'ثامن' ? '8' : '9';
+  const gradeDailyArchivedCount = dailyArchivedStats.filter(
+    (d) => d.grade === selectedGradeCode
+  ).length;
+  const todayDayKey = formatDayKeyFromTimestamp(nowTick);
+  const todaySubmissionsCount = filteredSubmissions.filter((sub) => {
+    const ts = getQuestionTimestamp(sub);
+    if (!ts) return false;
+    return formatDayKeyFromTimestamp(ts) === todayDayKey && (!latestRolloverTs || ts >= latestRolloverTs);
+  }).length;
 
   const renderSubjectsProgressSection = (
     subjectsList: Array<{ name: string; count: number; percent: number }>
@@ -977,40 +923,49 @@ export const PrincipalStatsTab: React.FC<PrincipalStatsTabProps> = ({
         </div>
       )}
 
-      {pendingSchedules.length > 0 && reportMode !== 'weekly' && (
-        <button
-          type="button"
-          onClick={() => setReportMode('weekly')}
-          className="w-full p-3 rounded-2xl bg-amber-50 hover:bg-amber-100 border border-amber-300 text-amber-950 text-xs font-black flex items-center justify-between gap-2 transition cursor-pointer shadow-xs"
-        >
-          <span className="flex items-center gap-2">
-            <Calendar className="w-4 h-4 text-amber-700 shrink-0" />
-            <span>يوجد {pendingSchedules.length} جدول حصص أسبوعي مرفوع من المشرف بانتظار اعتمادك للترم الأول</span>
-          </span>
-          <span className="px-2.5 py-1 rounded-xl bg-amber-600 text-white text-[11px] shrink-0">
-            عرض واعتماد
-          </span>
-        </button>
-      )}
-
       {/* ===================================================================== */}
-      {/* 1. التقرير الأسبوعي (Weekly Report - Image 2)                         */}
+      {/* 1. التقرير اليومي (Daily Statistics + Automatic Rollover Archiving)   */}
       {/* ===================================================================== */}
       {reportMode === 'weekly' && (
         <div className="space-y-6">
+          {/* Daily Auto-Archive Notice Banner (when submissions rollover has archived past days) */}
+          <div className="rounded-2xl bg-[#EEF5FC] border border-[#C6DCF2] px-4 py-3 flex flex-wrap items-center justify-between gap-2 text-xs">
+            <div className="flex items-center gap-2 text-[#1A3A5F] font-bold">
+              <Archive className="w-4 h-4 text-[#1F5AAA] shrink-0" />
+              <span>
+                {gradeDailyArchivedCount > 0
+                  ? `تمت أرشفة إحصائيات ${gradeDailyArchivedCount} يوم تلقائياً عند اكتمال ترحيل التسليمات (تسليمات اليوم النشطة: ${todaySubmissionsCount})`
+                  : `تُؤرشف الإحصائيات يومياً تلقائياً في أرشيف الإحصائيات عند اكتمال ترحيل التسليمات (تسليمات اليوم: ${todaySubmissionsCount})`}
+              </span>
+            </div>
+            {onOpenStatsArchive && (
+              <button
+                type="button"
+                onClick={onOpenStatsArchive}
+                className="px-3 py-1.5 rounded-xl bg-[#1F5AAA] hover:bg-[#194B91] text-white text-xs font-black inline-flex items-center gap-1 shadow-2xs cursor-pointer transition shrink-0"
+              >
+                <span>فتح أرشيف الإحصائيات</span>
+                <ChevronLeft className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+
           {/* 4 Glassmorphic Cards — strictly 2 per row */}
           <div className="grid grid-cols-2 gap-3">
-            {/* Card 1: إجمالي تسليمات الأسبوع */}
+            {/* Card 1: إجمالي التسليمات */}
             <div className={`${GLASS_CARD_CLASS} p-3.5 sm:p-4 flex flex-col justify-between min-h-[112px]`}>
               <div className="flex items-start justify-between gap-2">
                 <span className="text-[11px] sm:text-xs font-bold text-[#334E68] leading-snug">
-                  إجمالي التسليمات
+                  تسليمات اليوم / الإجمالي
                 </span>
                 <CheckSquare className="w-7 h-7 shrink-0" stroke="url(#azalIconGrad)" />
               </div>
               <div className="text-center pt-2">
                 <span className="text-3xl sm:text-4xl font-black text-[#0F2D4A] tabular-nums">
-                  {totalCount}
+                  {todaySubmissionsCount}
+                </span>
+                <span className="block text-[10px] font-bold text-[#5C7085] mt-0.5 tabular-nums">
+                  الإجمالي التراكمي للأسبوع: {totalCount}
                 </span>
               </div>
             </div>
@@ -1248,376 +1203,6 @@ export const PrincipalStatsTab: React.FC<PrincipalStatsTabProps> = ({
                 ))
               )}
             </div>
-          </section>
-
-          {/* اعتماد جداول الحصص الأسبوعية (الترم الأول - يرفعها المشرف ويعتمدها المدير مرة واحدة فقط) */}
-          <section className="space-y-3 bg-white rounded-2xl border border-[#DCE7F3] p-4 sm:p-5 shadow-sm">
-            <div className="flex items-center justify-between flex-wrap gap-2">
-              <div>
-                <h2 className="text-base sm:text-lg font-black text-[#1A3A5F] flex items-center gap-2">
-                  <Calendar className="w-5 h-5 text-[#1F5AAA] shrink-0" />
-                  <span>جداول الحصص الأسبوعية — الترم الأول</span>
-                </h2>
-                <p className="text-[11px] sm:text-xs font-semibold text-[#5C7085] mt-0.5">
-                  يرفعها المشرف وتُعتمد مرة واحدة فقط لتثبت لكل صف وفصل طوال الترم الأول
-                </p>
-              </div>
-              <div className="flex items-center gap-2">
-                {pendingSchedules.length > 0 && (
-                  <span className="px-2.5 py-1 rounded-full bg-amber-100 text-amber-900 border border-amber-300 text-[11px] font-black">
-                    {pendingSchedules.length} بانتظار الاعتماد
-                  </span>
-                )}
-                <span className="px-2.5 py-1 rounded-full bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] text-[11px] font-black">
-                  {approvedSchedules.length} جدول معتمد
-                </span>
-              </div>
-            </div>
-
-            {pendingSchedules.length > 0 && (
-              <div className="space-y-3 pt-1">
-                {pendingSchedules.map((sch) => {
-                  const previewEntries =
-                    sch.hasPendingUpdate && sch.pendingEntries?.length
-                      ? sch.pendingEntries
-                      : sch.entries;
-                  const isBusy = scheduleBusyId === sch.id;
-                  const isRejectOpen = rejectNoteOpenId === sch.id;
-                  return (
-                    <div
-                      key={sch.id}
-                      className="rounded-2xl bg-[#F4F8FC] border-2 border-amber-300 p-3.5 sm:p-4 space-y-3"
-                    >
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <div>
-                          <div className="flex flex-wrap items-center gap-1.5">
-                            <span className="px-2.5 py-0.5 rounded-lg bg-amber-100 text-amber-900 border border-amber-300 text-[11px] font-black">
-                              {sch.hasPendingUpdate ? 'تحديث مقترح بانتظار الاعتماد' : 'بانتظار اعتماد المدير'}
-                            </span>
-                            <span className="px-2.5 py-0.5 rounded-lg bg-white text-[#1A3A5F] border border-[#DCE7F3] text-[11px] font-black">
-                              {sch.gradeLabel} — فصل {sch.classNumber}
-                            </span>
-                          </div>
-                          <p className="text-[11px] font-semibold text-[#5C7085] mt-1">
-                            رفعه المشرف: {sch.hasPendingUpdate && sch.pendingUploadedBy ? sch.pendingUploadedBy : sch.uploadedBy} •{' '}
-                            {sch.hasPendingUpdate && sch.pendingUploadedAtFormatted ? sch.pendingUploadedAtFormatted : sch.uploadedAtFormatted}
-                          </p>
-                        </div>
-
-                        <div className="flex flex-wrap items-center gap-2">
-                          <button
-                            type="button"
-                            disabled={isBusy}
-                            onClick={() => handleApproveSchedule(sch)}
-                            className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-black flex items-center gap-1.5 shadow-xs cursor-pointer transition"
-                          >
-                            <CheckCircle2 className="w-4 h-4 shrink-0" />
-                            <span>{isBusy ? 'جاري الاعتماد...' : 'اعتماد وتثبيت للترم الأول'}</span>
-                          </button>
-
-                          <button
-                            type="button"
-                            disabled={isBusy}
-                            onClick={() => {
-                              setRejectNoteOpenId(isRejectOpen ? null : sch.id);
-                              setRejectNoteText('');
-                            }}
-                            className="px-3 py-2 rounded-xl bg-white hover:bg-rose-50 text-rose-700 border border-rose-200 text-xs font-black flex items-center gap-1.5 cursor-pointer transition"
-                          >
-                            <XCircle className="w-4 h-4 shrink-0" />
-                            <span>إرجاع للمشرف</span>
-                          </button>
-                        </div>
-                      </div>
-
-                      {isRejectOpen && (
-                        <div className="rounded-xl bg-white border border-rose-200 p-3 space-y-2">
-                          <label className="block text-[11px] font-black text-rose-900">
-                            سبب الإرجاع أو الملاحظة للمشرف (اختياري):
-                          </label>
-                          <div className="flex flex-wrap items-center gap-2">
-                            <input
-                              type="text"
-                              value={rejectNoteText}
-                              onChange={(e) => setRejectNoteText(e.target.value)}
-                              placeholder="مثال: يرجى تعديل مادة الحصة الثالثة يوم الاثنين..."
-                              className="flex-1 min-w-[200px] px-3 py-2 rounded-xl border border-[#DCE7F3] text-xs font-semibold text-[#1A3A5F] focus:outline-none focus:border-[#1F5AAA]"
-                            />
-                            <button
-                              type="button"
-                              disabled={isBusy}
-                              onClick={() => handleRejectSchedule(sch)}
-                              className="px-3.5 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-black cursor-pointer"
-                            >
-                              تأكيد الإرجاع
-                            </button>
-                          </div>
-                        </div>
-                      )}
-
-                      <ScheduleGridView entries={previewEntries} compact />
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-
-            {approvedSchedules.length === 0 ? (
-              pendingSchedules.length === 0 && (
-                <div className="rounded-2xl bg-[#F4F8FC] border border-[#DCE7F3] p-4 text-center text-xs font-bold text-[#5C7085]">
-                  لا توجد جداول حصص معتمدة بعد. يقوم المشرف برفع جدول كل صف وإرساله للاعتماد من هنا.
-                </div>
-              )
-            ) : (
-              <div className="space-y-2 pt-1">
-                {approvedSchedules.map((sch) => {
-                  const isOpen = expandedApprovedScheduleId === sch.id;
-                  return (
-                    <div
-                      key={sch.id}
-                      className="rounded-2xl bg-[#F8FAFD] border border-[#DCE7F3] overflow-hidden"
-                    >
-                      <button
-                        type="button"
-                        onClick={() => setExpandedApprovedScheduleId(isOpen ? null : sch.id)}
-                        className="w-full p-3 flex items-center justify-between gap-2 text-right hover:bg-[#EEF5FC]/60 transition cursor-pointer"
-                      >
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-lg bg-emerald-100 text-emerald-900 border border-emerald-200 text-[11px] font-black">
-                            <Lock className="w-3 h-3" />
-                            <span>معتمد ومثبت</span>
-                          </span>
-                          <span className="text-xs sm:text-sm font-black text-[#1A3A5F]">
-                            {sch.gradeLabel} — فصل {sch.classNumber}
-                          </span>
-                          <span className="text-[11px] font-semibold text-[#5C7085]">
-                            (الترم {sch.term} • رفعه: {sch.uploadedBy})
-                          </span>
-                        </div>
-                        <span className="text-xs font-black text-[#1F5AAA] flex items-center gap-1 shrink-0">
-                          <Eye className="w-3.5 h-3.5" />
-                          <span>{isOpen ? 'إخفاء' : 'عرض'}</span>
-                          {isOpen ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                        </span>
-                      </button>
-
-                      {isOpen && (
-                        <div className="p-3 border-t border-[#DCE7F3] bg-white">
-                          <ScheduleGridView
-                            entries={sch.entries}
-                            subtitle={`اعتمده: ${sch.approvedBy || displayManagerName} • ${sch.approvedAtFormatted || ''}`}
-                            compact
-                          />
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </section>
-
-          {/* تقارير الحضور والغياب اليومية (تظهر للمدير في التقارير والاعتماد في البريد) */}
-          <section className="space-y-3 bg-white rounded-2xl border border-[#DCE7F3] p-4 sm:p-5 shadow-sm">
-            <div className="flex items-center justify-between flex-wrap gap-2">
-              <div>
-                <h2 className="text-base sm:text-lg font-black text-[#1A3A5F] flex items-center gap-2">
-                  <UserCheck className="w-5 h-5 text-[#1F5AAA] shrink-0" />
-                  <span>تقارير الحضور والغياب اليومية (من المشرف)</span>
-                </h2>
-                <p className="text-[11px] sm:text-xs font-semibold text-[#5C7085] mt-0.5">
-                  تُرفع من بوابة المشرف وتظهر هنا للمتابعة، وتُعتمد من تبويب (البريد) لتُنشر في لوحة المدرسة
-                </p>
-              </div>
-              <span className="px-2.5 py-1 rounded-full bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] text-[11px] font-black">
-                {filteredAttendanceRecords.length} كشف مسجل
-              </span>
-            </div>
-
-            {filteredAttendanceRecords.length === 0 ? (
-              <div className="rounded-2xl bg-[#F4F8FC] border border-[#DCE7F3] p-4 text-center text-xs font-bold text-[#5C7085]">
-                لا توجد كشوفات حضور وغياب مسجلة من المشرف بعد.
-              </div>
-            ) : (
-              <div className="space-y-2.5">
-                {filteredAttendanceRecords.slice(0, 12).map((rec) => {
-                  const isExpanded = expandedAttendanceId === rec.id;
-                  const excusedCount =
-                    rec.absentExcusedCount ??
-                    rec.entries.filter((e) => e.status === 'غائب بعذر').length;
-                  const unexcusedCount =
-                    rec.absentUnexcusedCount ??
-                    rec.entries.filter((e) => e.status === 'غائب بدون عذر' || e.status === 'غائب').length;
-                  return (
-                    <div
-                      key={rec.id}
-                      className="rounded-2xl bg-[#F8FAFD] border border-[#DCE7F3] overflow-hidden"
-                    >
-                      <button
-                        type="button"
-                        onClick={() => setExpandedAttendanceId(isExpanded ? null : rec.id)}
-                        className="w-full p-3.5 flex flex-wrap items-center justify-between gap-2 text-right hover:bg-[#EEF5FC]/60 transition cursor-pointer"
-                      >
-                        <div className="space-y-0.5">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span className="text-xs sm:text-sm font-black text-[#1A3A5F]">
-                              {rec.gradeLabel} — فصل {rec.classNumber}
-                            </span>
-                            <span className="px-2 py-0.5 rounded-lg bg-white border border-[#DCE7F3] text-[11px] font-mono font-bold text-[#1F5AAA]">
-                              {rec.date}
-                            </span>
-                            <span
-                              className={`px-2 py-0.5 rounded-full text-[10px] font-black ${
-                                rec.approvalStatus === 'approved'
-                                  ? 'bg-emerald-100 text-emerald-900'
-                                  : rec.approvalStatus === 'revision_requested'
-                                  ? 'bg-orange-100 text-orange-900'
-                                  : rec.approvalStatus === 'rejected'
-                                  ? 'bg-rose-100 text-rose-900'
-                                  : 'bg-amber-100 text-amber-900'
-                              }`}
-                            >
-                              {rec.approvalStatus === 'approved'
-                                ? 'معتمد'
-                                : rec.approvalStatus === 'revision_requested'
-                                ? 'طلب تعديل'
-                                : rec.approvalStatus === 'rejected'
-                                ? 'مرفوض'
-                                : 'بانتظار الاعتماد'}
-                            </span>
-                          </div>
-                          <p className="text-[11px] font-semibold text-[#5C7085]">
-                            سجّل الحضور: {rec.recordedBy} • {rec.createdAtFormatted}
-                          </p>
-                        </div>
-
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          <span className="px-2 py-0.5 rounded-lg bg-emerald-100 text-emerald-900 border border-emerald-200 text-[11px] font-black tabular-nums">
-                            حاضر: {rec.presentCount}
-                          </span>
-                          <span className="px-2 py-0.5 rounded-lg bg-sky-100 text-[#1F5AAA] border border-[#C6DCF2] text-[11px] font-black tabular-nums">
-                            بعذر: {excusedCount}
-                          </span>
-                          <span className="px-2 py-0.5 rounded-lg bg-rose-100 text-rose-900 border border-rose-200 text-[11px] font-black tabular-nums">
-                            بدون عذر: {unexcusedCount}
-                          </span>
-                          <span className="px-2 py-0.5 rounded-lg bg-amber-100 text-amber-900 border border-amber-200 text-[11px] font-black tabular-nums">
-                            متأخر: {rec.lateCount}
-                          </span>
-                          {isExpanded ? (
-                            <ChevronUp className="w-4 h-4 text-[#1F5AAA]" />
-                          ) : (
-                            <ChevronDown className="w-4 h-4 text-[#1F5AAA]" />
-                          )}
-                        </div>
-                      </button>
-
-                      {isExpanded && (
-                        <div className="p-3 bg-white border-t border-[#DCE7F3] grid grid-cols-1 sm:grid-cols-2 gap-1.5">
-                          {rec.entries.map((entry, idx) => (
-                            <div
-                              key={`${rec.id}_${idx}`}
-                              className="px-3 py-2 rounded-xl bg-[#F8FAFD] border border-[#E6EEF7] flex items-center justify-between gap-2 text-xs"
-                            >
-                              <span className="font-bold text-[#1A3A5F] truncate">
-                                {idx + 1}. {entry.studentName}
-                              </span>
-                              <span
-                                className={`px-2 py-0.5 rounded-lg text-[11px] font-black shrink-0 ${
-                                  entry.status === 'حاضر'
-                                    ? 'bg-emerald-100 text-emerald-900'
-                                    : entry.status === 'غائب بعذر'
-                                    ? 'bg-sky-100 text-[#1F5AAA]'
-                                    : entry.status === 'متأخر'
-                                    ? 'bg-amber-100 text-amber-900'
-                                    : 'bg-rose-100 text-rose-900'
-                                }`}
-                              >
-                                {entry.status === 'غائب' ? 'غائب بدون عذر' : entry.status}
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </section>
-
-          {/* تقارير وأنشطة وفعاليات المشرف */}
-          <section className="space-y-3 bg-white rounded-2xl border border-[#DCE7F3] p-4 sm:p-5 shadow-sm">
-            <div className="flex items-center justify-between flex-wrap gap-2">
-              <h2 className="text-base sm:text-lg font-black text-[#1A3A5F] flex items-center gap-2">
-                <Flag className="w-5 h-5 text-[#1F5AAA] shrink-0" />
-                <span>أنشطة وتقارير وفعاليات المشرف</span>
-              </h2>
-              <span className="px-2.5 py-1 rounded-full bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] text-[11px] font-black">
-                {filteredSupervisorActivities.length} سجل
-              </span>
-            </div>
-
-            <div className="flex items-center gap-1.5 flex-wrap">
-              {(['الكل', ...SUPERVISOR_ACTIVITY_CATEGORIES] as const).map((cat) => (
-                <button
-                  key={cat}
-                  type="button"
-                  onClick={() => setSupervisorActFilter(cat)}
-                  className={`px-2.5 py-1 rounded-xl text-[11px] font-black transition cursor-pointer ${
-                    supervisorActFilter === cat
-                      ? 'bg-[#1F5AAA] text-white border border-[#194B91]'
-                      : 'bg-[#F0F4F8] text-[#1A3A5F] border border-[#DCE7F3] hover:bg-[#E4EEF8]'
-                  }`}
-                >
-                  {cat}
-                </button>
-              ))}
-            </div>
-
-            {filteredSupervisorActivities.length === 0 ? (
-              <div className="rounded-2xl bg-[#F4F8FC] border border-[#DCE7F3] p-4 text-center text-xs font-bold text-[#5C7085]">
-                لا توجد أنشطة أو تقارير مشرف مسجلة ضمن هذا التصنيف بعد.
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {filteredSupervisorActivities.slice(0, 10).map((act) => (
-                  <div
-                    key={act.id}
-                    className="rounded-2xl bg-[#F8FAFD] border border-[#DCE7F3] p-3.5 space-y-1.5"
-                  >
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <span className="px-2.5 py-0.5 rounded-lg bg-[#EEF5FC] text-[#1F5AAA] border border-[#C6DCF2] text-[11px] font-black flex items-center gap-1">
-                          <Sparkles className="w-3 h-3" />
-                          <span>{act.category}</span>
-                        </span>
-                        {act.subType && (
-                          <span className="px-2 py-0.5 rounded-lg bg-white border border-[#DCE7F3] text-[11px] font-bold text-[#1A3A5F]">
-                            {act.subType}
-                          </span>
-                        )}
-                        {act.targetGrade && act.targetGrade !== 'all' && act.targetGrade !== 'الكل' && (
-                          <span className="px-2 py-0.5 rounded-lg bg-white border border-[#DCE7F3] text-[11px] font-bold text-[#1A3A5F]">
-                            {getGradeLabelAr(act.targetGrade)}
-                          </span>
-                        )}
-                      </div>
-                      <span className="text-[11px] font-semibold text-[#5C7085] tabular-nums">
-                        {act.activityDate}
-                      </span>
-                    </div>
-                    <h4 className="text-xs sm:text-sm font-black text-[#1A3A5F]">{act.title}</h4>
-                    {act.details && (
-                      <p className="text-xs text-slate-600 font-medium leading-relaxed">{act.details}</p>
-                    )}
-                    <p className="text-[11px] font-semibold text-[#5C7085]">
-                      سجله المشرف: {act.createdBy} • {act.createdAtFormatted}
-                    </p>
-                  </div>
-                ))}
-              </div>
-            )}
           </section>
         </div>
       )}

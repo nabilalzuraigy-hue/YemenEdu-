@@ -53,6 +53,8 @@ import {
   isObjectiveQuestion,
   formatArabicDateTime,
   getQuestionTimestamp,
+  doesAnnouncementMatchGrade,
+  formatAnnouncementTargetGradesAr,
   ACADEMIC_MONTHS,
   getCurrentAcademicMonth,
   MonthlyGradebookRecord,
@@ -114,10 +116,12 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
     )
   );
 
-  // Circulars with unread tracking & sound (Read-Only for Teacher, strictly real principal circulars)
+  // Circulars with unread tracking & sound (Read-Only for Teacher, strictly real principal circulars matching grade)
   const [teacherCirculars, setTeacherCirculars] = useState<Array<Announcement & { isRead?: boolean }>>(() => {
     if (!session.schoolId) return [];
-    return appDataService.getAnnouncements('teacher', session.schoolId).map((a) => ({ ...a, isRead: false }));
+    return appDataService
+      .getAnnouncements('teacher', session.schoolId, teacherGrade)
+      .map((a) => ({ ...a, isRead: false }));
   });
   const playedCircularIdsRef = useRef<Set<string>>(new Set());
 
@@ -262,16 +266,20 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
                     title: data.title || '',
                     content: data.content || '',
                     target: data.target || 'teachers',
+                    targetGrades: Array.isArray(data.targetGrades) ? data.targetGrades : undefined,
                     priority: data.priority || 'عادي',
                     senderName: resolvedSender,
                     senderRoleAr: data.senderRoleAr || 'مدير المدرسة',
                     schoolId: data.schoolId || session.schoolId,
                     createdAt: data.createdAtFormatted || 'الآن',
+                    timestamp: typeof data.timestamp === 'number' ? data.timestamp : undefined,
                     readCount: 1,
                     isRead: false,
                   };
                 })
-                .filter((c) => !isSimulationAnnouncement(c));
+                .filter(
+                  (c) => !isSimulationAnnouncement(c) && doesAnnouncementMatchGrade(c, teacherGrade)
+                );
 
           if (list.length > 0) {
             // Trigger gentle audio chime alert if a new circular arrived (no duplicate alerts)
@@ -568,22 +576,21 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
       );
     } catch (_) {}
 
-    // 6. Direct Firestore query: Approved Fixed Term 1 Weekly Class Schedules
+    // 6. Direct Firestore query: Approved Fixed Term 1 Weekly Class Schedules (single-field query, no composite index needed)
     let unsubSchedules = () => {};
     try {
       if (currentUser?.schoolId) {
         const normalizedSchool = currentUser.schoolId.trim().toLowerCase();
         const qSched = query(
           collection(db, 'class_schedules'),
-          where('schoolId', '==', currentUser.schoolId),
-          where('isApproved', '==', true)
+          where('schoolId', '==', currentUser.schoolId)
         );
         unsubSchedules = onSnapshot(
           qSched,
           (snap) => {
             const list = snap.docs
               .map((d) => ({ ...d.data(), id: d.id } as ClassSchedule))
-              .filter((s) => (s.schoolId || '').trim().toLowerCase() === normalizedSchool && s.isApproved)
+              .filter((s) => (s.schoolId || '').trim().toLowerCase() === normalizedSchool && s.isApproved === true)
               .sort((a, b) => Number(a.grade) - Number(b.grade));
             setApprovedSchoolSchedules(list);
           },
@@ -607,6 +614,9 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
   // Strict Teacher Isolation: Teacher ONLY sees Term 1 schedules of classes/grades they actually teach
   const teacherTaughtSchedules = approvedSchoolSchedules.filter((sch) => {
     const entries = sch.entries || [];
+    if (entries.length === 0 && sch.scheduleImageUrl) {
+      return !teacherGrade || String(sch.grade).trim() === String(teacherGrade).trim();
+    }
     const matchesByTeacherName = entries.some((slot) =>
       slot.teacherName?.trim() ? doesSlotMatchTeacher(slot, session.name) : false
     );
@@ -3106,8 +3116,8 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
                       }`}
                     >
                       <div>
-                        <div className="flex items-center justify-between mb-2">
-                          <div className="flex items-center gap-2">
+                        <div className="flex items-center justify-between flex-wrap gap-1.5 mb-2">
+                          <div className="flex flex-wrap items-center gap-1.5">
                             {!anc.isRead && (
                               <span className="w-2.5 h-2.5 rounded-full bg-[#1F5AAA] animate-pulse" title="تعميم جديد غير مقروء" />
                             )}
@@ -3119,6 +3129,9 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
                               }`}
                             >
                               {anc.priority}
+                            </span>
+                            <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-md bg-[#F4F8FC] text-[#1A3A5F] border border-[#DCE7F3]">
+                              {formatAnnouncementTargetGradesAr(anc.targetGrades)}
                             </span>
                           </div>
                           <span className="text-[11px] text-slate-600 font-semibold">{anc.createdAt}</span>
@@ -3187,6 +3200,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({ session }) =
                 >
                   <ScheduleGridView
                     entries={sch.entries}
+                    scheduleImageUrl={sch.scheduleImageUrl}
                     title={`${sch.gradeLabel} — فصل ${sch.classNumber}`}
                     subtitle={`الترم ${sch.term} • رفعه المشرف: ${sch.uploadedBy} • اعتمده: ${sch.approvedBy || 'مدير المدرسة'}`}
                     highlightTeacherName={session.name}
